@@ -2,10 +2,11 @@ import os
 
 import numpy as np
 
-import bumps.fitters as fit
-from bumps.cli import load_model
+from bumps import fitters
+from bumps.names import load_problem
 
 SEED = 1
+
 
 def example_dir():
     """
@@ -29,36 +30,42 @@ def example_dir():
     # file context because there is an explicit chdir to the directory
     # containing the plot.
     import inspect
+
     frame = inspect.currentframe()
-    RSTDIR='rst_dir'
+    RSTDIR = "rst_dir"
     while frame and RSTDIR not in frame.f_locals:
         frame = frame.f_back
-        #print "checking",frame.f_code.co_name
+        # print "checking",frame.f_code.co_name
     if not frame:
-        raise RuntimeError('plot directive changed: %r no longer defined'%RSTDIR)
+        raise RuntimeError("plot directive changed: %r no longer defined" % RSTDIR)
     return frame.f_locals[RSTDIR] if frame else ""
+
 
 def plot_model(filename):
     from matplotlib import pyplot as plt
-    #import sys; print >>sys.stderr, "in plot with",filename, example_dir()
+
+    # import sys; print >>sys.stderr, "in plot with",filename, example_dir()
     np.random.seed(SEED)
-    p = load_model(os.path.join(example_dir(), filename))
+    p = load_problem(os.path.join(example_dir(), filename))
     p.plot()
     plt.show()
 
+
 def fit_model(filename):
     from matplotlib import pyplot as plt
-    #import sys; print >>sys.stderr, "in plot with",filename, example_dir()
+
+    # import sys; print >>sys.stderr, "in plot with",filename, example_dir()
     np.random.seed(SEED)
-    p =load_model(os.path.join(example_dir(),filename))
-    #x.fx = fit.RLFit(p).solve(steps=1000, burn=99)
-    #x,fx = fit.DEFit(p).solve(steps=200, pop=10)
-    #x,fx = fit.PTFit(p).solve(steps=100,burn=400)
-    #x.fx = fit.BFGSFit(p).solve(steps=200)
-    x,fx = fit.SimplexFit(p).solve(steps=1000)
-    chisq = p(x)
-    print("chisq=%g"%chisq)
-    if chisq>2:
+    problem = load_problem(os.path.join(example_dir(), filename))
+    # x, fx = fit.RLFit(problem).solve(steps=1000, burn=99)
+    # x, fx = fit.DEFit(problem).solve(steps=200, pop=10)
+    # x, fx = fit.PTFit(problem).solve(steps=100,burn=400)
+    # x, fx = fit.BFGSFit(problem).solve(steps=200)
+    # x, fx = fit.SimplexFit(problem).solve(steps=1000)
+    result = fitters.fit(problem, method="amoeba", verbose=False, steps=1000)
+    chisq = problem(result.x)
+    print("chisq=%g" % chisq)
+    if chisq > 2:
         raise RuntimeError("Fit did not converge")
-    p.plot()
+    problem.plot()
     plt.show()

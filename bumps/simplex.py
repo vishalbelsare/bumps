@@ -1,4 +1,4 @@
-#__docformat__ = "restructuredtext en"
+# __docformat__ = "restructuredtext en"
 # ******NOTICE***************
 # From optimize.py module by Travis E. Oliphant
 #
@@ -11,14 +11,11 @@
 Downhill simplex optimizer.
 """
 
-from __future__ import print_function
-
-__all__ = ['simplex']
+__all__ = ["simplex"]
 __docformat__ = "restructuredtext en"
 __version__ = "0.7"
 
 import numpy as np
-
 
 
 def wrap_function(function, bounds):
@@ -34,18 +31,19 @@ def wrap_function(function, bounds):
                 # function(x)
                 return function(x)
     else:
+
         def function_wrapper(x):
             ncalls[0] += 1
             return function(x)
+
     return ncalls, function_wrapper
 
 
 class Result(object):
-
     """
     Results from the fit.
 
-    x : ndarray
+    x : NDArray
         Best parameter set
     fx : float
         Best value
@@ -64,22 +62,21 @@ class Result(object):
 
     def __str__(self):
         msg = "Converged" if self.status else "Aborted"
-        return ("%s with %g at %s after %d calls"
-                % (msg, self.fx, self.x, self.calls))
+        return "%s with %g at %s after %d calls" % (msg, self.fx, self.x, self.calls)
 
 
 def dont_abort():
     return False
 
 
-def simplex(f, x0=None, bounds=None, radius=0.05,
-            xtol=1e-4, ftol=1e-4, maxiter=None,
-            update_handler=None, abort_test=dont_abort):
+def simplex(
+    f, x0=None, bounds=None, radius=0.05, xtol=1e-4, ftol=1e-4, maxiter=None, update_handler=None, abort_test=dont_abort
+):
     """
     Minimize a function using Nelder-Mead downhill simplex algorithm.
 
     This optimizer is also known as Amoeba (from Numerical Recipes) and
-    the Nealder-Mead simplex algorithm.  This is not the simplex algorithm
+    the Nelder-Mead simplex algorithm.  This is not the simplex algorithm
     for solving constrained linear systems.
 
     Downhill simplex is a robust derivative free algorithm for finding
@@ -94,9 +91,9 @@ def simplex(f, x0=None, bounds=None, radius=0.05,
 
         f : callable f(x,*args)
             The objective function to be minimized.
-        x0 : ndarray
+        x0 : NDArray
             Initial guess.
-        bounds : (ndarray,ndarray) or None
+        bounds : (NDArray,NDArray) or None
             Bounds on the parameter values for the function.
         radius: float
             Size of the initial simplex.  For bounded parameters (those
@@ -106,7 +103,7 @@ def simplex(f, x0=None, bounds=None, radius=0.05,
 
     *Returns*: Result (`park.simplex.Result`)
 
-        x : ndarray
+        x : NDArray
             Parameter that minimizes function.
         fx : float
             Value of function at minimum: ``fopt = func(xopt)``.
@@ -141,7 +138,7 @@ def simplex(f, x0=None, bounds=None, radius=0.05,
 
     """
     fcalls, func = wrap_function(f, bounds)
-    x0 = np.asfarray(x0).flatten()
+    x0 = np.asarray(x0, dtype=float).flatten()
     # print "x0",x0
     N = len(x0)
     rank = len(x0.shape)
@@ -191,8 +188,7 @@ def simplex(f, x0=None, bounds=None, radius=0.05,
         if np.any(collision):
             reverse = x0 * (1 - radius)
             reverse[reverse == 0] = -radius
-            reverse[bounded] = x0[bounded] - \
-                (hi[bounded] - lo[bounded]) * radius
+            reverse[bounded] = x0[bounded] - (hi[bounded] - lo[bounded]) * radius
             val[collision] = reverse[collision]
 
         # Make tolerance relative for bounded parameters
@@ -216,8 +212,7 @@ def simplex(f, x0=None, bounds=None, radius=0.05,
 
     iterations = 1
     while iterations < maxiter:
-        if np.all(abs(sim[1:] - sim[0]) <= xtol) \
-                and max(abs(fsim[0] - fsim[1:])) <= ftol:
+        if np.all(abs(sim[1:] - sim[0]) <= xtol) and max(abs(fsim[0] - fsim[1:])) <= ftol:
             # print abs(sim[1:]-sim[0])
             break
 
@@ -347,6 +342,7 @@ def main():
     x = simplex(rosen, x0, bounds=(lo, hi), xtol=1e-4)
     print(x)
     print("Time:", time.time() - start)
+
 
 if __name__ == "__main__":
     main()

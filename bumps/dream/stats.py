@@ -2,20 +2,109 @@
 Statistics helper functions.
 """
 
-__all__ = ["VarStats", "var_stats", "format_vars", "parse_var",
-           "stats", "credible_interval", "shortest_credible_interval"]
+__all__ = [
+    "VarStats",
+    "var_stats",
+    "format_uncertainty",
+    "format_num",
+    "format_vars",
+    "parse_var",
+    "stats",
+    "credible_interval",
+    "shortest_credible_interval",
+]
 
+from dataclasses import dataclass, field
 import re
 import json
 
 import numpy as np
+from uncertainties import ufloat, ufloat_fromstr
 
-from .formatnum import format_uncertainty
+
+def clean_exponent(s: str) -> str:
+    """Remove leading + and leading zeros from exponent in a scientific notation number."""
+    head, sep, tail = s.partition("e")
+
+    # If there is no 'e', return the original string
+    if not sep:
+        return s
+
+    # Reassemble: head + 'e' + cleaned integer exponent
+    return f"{head}e{int(tail)}"
 
 
+def format_uncertainty(mean, std):
+    """Opinionated formatting of mean and standard deviation."""
+    # Handle indefinite value
+    if np.isinf(mean):
+        return "inf" if mean > 0 else "-inf"
+    if np.isnan(mean):
+        return "NaN"
+
+    if std is None or std <= 0 or np.isnan(std):
+        return str(mean)
+    if np.isinf(std):
+        # Format val(inf) using two digits of precision
+        two_digits = f"{ufloat(mean, abs(mean)):.2uS}"
+        return clean_exponent(re.sub(r"\(.*\)", "(inf)", two_digits))
+
+    return clean_exponent(f"{ufloat(mean, std):.2uS}")
+
+
+def test_format_uncertainty():
+    from math import inf, nan
+
+    def check_val(val, unc, expected):
+        res = format_uncertainty(val, unc)
+        # if res != expected:
+        #    print(f"{val} ± {unc} => {res} != {expected}")
+        assert res == expected, f"{val} ± {unc} => {res} != {expected}"
+
+    # non-finite values
+    check_val(-inf, None, "-inf")
+    check_val(inf, None, "inf")
+    check_val(nan, None, "NaN")
+
+    # bad or missing uncertainty
+    check_val(-1.23567, nan, "-1.23567")
+    check_val(-1.23567, -inf, "-1.23567")
+    check_val(-1.23567, -0.1, "-1.23567")
+    check_val(-1.23567, 0, "-1.23567")
+    check_val(-1.23567, None, "-1.23567")
+    check_val(-1.23567, inf, "-1.2(inf)")
+    check_val(-123.567, inf, "-1.2(inf)e2")
+    check_val(-0.00123567, inf, "-0.0012(inf)")
+    check_val(-0.0000123567, inf, "-1.2(inf)e-5")
+
+
+@dataclass
 class VarStats(object):
-    def __init__(self, **kw):
-        self.__dict__ = kw
+    label: str
+    index: int
+    p95: tuple[float, float]
+    p68: tuple[float, float]
+    # p95sd: float
+    # p68sd: float
+    median: float
+    mean: float
+    std: float
+    best: float
+    integer: bool = False
+    p95_range: tuple[float, float] = field(init=False)
+    p68_range: tuple[float, float] = field(init=False)
+
+    def __post_init__(self):
+        self.p95_range = (self.p95[0], self.p95[1] + self.integer * 0.9999999999)
+        self.p68_range = (self.p68[0], self.p68[1] + self.integer * 0.9999999999)
+
+    def __str__(self):
+        return f"{self.label}={format_uncertainty(self.mean, self.std)}"
+
+    # CRUFT: sasview is looking for name instead of label
+    @property
+    def name(self):
+        return self.label
 
 
 def var_stats(draw, vars=None):
@@ -24,7 +113,7 @@ def var_stats(draw, vars=None):
     return [_var_stats_one(draw, v) for v in vars]
 
 
-ONE_SIGMA = 1 - 2*0.15865525393145705
+ONE_SIGMA = 1 - 2 * 0.15865525393145705
 
 
 def _var_stats_one(draw, var):
@@ -36,32 +125,38 @@ def _var_stats_one(draw, var):
 
     best_idx = np.argmax(draw.logp)
     best = values[best_idx]
+    x_sort_index = draw.get_argsort_indices(var)
 
     # Choose the interval for the histogram
-    #credible_interval = shortest_credible_interval
-    p95, p68, p0 = credible_interval(x=values, weights=weights,
-                                     ci=[0.95, ONE_SIGMA, 0.0])
+    # credible_interval = shortest_credible_interval
+    p95, p68, p0 = credible_interval(x=values, weights=weights, ci=[0.95, ONE_SIGMA, 0.0], x_sort_index=x_sort_index)
 
     ## reporting uncertainty on credible intervals?
     ## might be nice to pair sd on credible intervals
     ## with the actual CIs, rather than use a separate param
-    #from .digits import credible_inderval_sd
-    #p95sd = credible_interval_sd(values, 0.95)
-    #p68sd = credible_interval_sd(values, ONE_SIGMA)
+    # from .digits import credible_inderval_sd
+    # p95sd = credible_interval_sd(values, 0.95)
+    # p68sd = credible_interval_sd(values, ONE_SIGMA)
 
-    #open('/tmp/out','a').write(
+    # open('/tmp/out','a').write(
     #     "in vstats: p68=%s, p95=%s, p0=%s, value range=%s\n"
     #     % (p68,p95,p0,(min(values),max(values))))
-    #if p0[0] != p0[1]: raise RuntimeError("wrong median %s"%(str(p0),))
+    # if p0[0] != p0[1]: raise RuntimeError("wrong median %s"%(str(p0),))
 
-    mean, std = stats(x=values, weights=weights)
+    mean, std = stats(x=values, weights=weights, x_sort_index=x_sort_index)
 
-    vstats = VarStats(label=draw.labels[var], index=var+1,
-                      p95=p95, p95_range=(p95[0], p95[1]+integer*0.9999999999),
-                      p68=p68, p68_range=(p68[0], p68[1]+integer*0.9999999999),
-                      # p95sd=p95sd, p68sd=p68sd,
-                      median=p0[0], mean=mean, std=std, best=best,
-                      integer=integer)
+    vstats = VarStats(
+        label=draw.labels[var],
+        index=var + 1,
+        p95=p95,
+        p68=p68,
+        # p95sd=p95sd, p68sd=p68sd,
+        median=p0[0],
+        mean=mean,
+        std=std,
+        best=best,
+        integer=integer,
+    )
 
     return vstats
 
@@ -69,45 +164,57 @@ def _var_stats_one(draw, var):
 def format_num(x, place):
     precision = 10**place
     digits_after_decimal = abs(place) if place < 0 else 0
-    return "%.*f" % (digits_after_decimal, np.round(x/precision)*precision)
+    return "%.*f" % (digits_after_decimal, np.round(x / precision) * precision)
 
 
 def format_vars(all_vstats):
-    v = dict(parameter="Parameter",
-             mean="mean", median="median", best="best",
-             interval68="68% interval",
-             interval95="95% interval")
-    s = ["   %(parameter)20s %(mean)10s %(median)7s %(best)7s "
-         "[%(interval68)15s] [%(interval95)15s]" % v]
+    v = dict(
+        parameter="Parameter",
+        mean="mean",
+        median="median",
+        best="best",
+        interval68="68% interval",
+        interval95="95% interval",
+    )
+    s = ["   %(parameter)20s %(mean)10s %(median)7s %(best)7s [%(interval68)15s] [%(interval95)15s]" % v]
     for v in all_vstats:
         # Make sure numbers are formatted with the appropriate precision
-        place = (int(np.log10(v.p95[1]-v.p95[0]))-2 if v.p95[1] > v.p95[0]
-                 else int(np.log10(abs(v.p95[0])))-3 if v.p95[0] != 0
-                 else 0)
-        summary = dict(mean=format_uncertainty(v.mean, v.std),
-                       median=format_num(v.median, place-1),
-                       best=format_num(v.best, place-1),
-                       lo68=format_num(v.p68[0], place),
-                       hi68=format_num(v.p68[1], place),
-                       loci=format_num(v.p95[0], place),
-                       hici=format_num(v.p95[1], place),
-                       parameter=v.label,
-                       index=v.index)
-        s.append("%(index)2d %(parameter)20s %(mean)10s %(median)7s %(best)7s "
-                 "[%(lo68)7s %(hi68)7s] [%(loci)7s %(hici)7s]" % summary)
+        place = (
+            int(np.log10(v.p95[1] - v.p95[0])) - 2
+            if v.p95[1] > v.p95[0]
+            else int(np.log10(abs(v.p95[0]))) - 3
+            if v.p95[0] != 0
+            else 0
+        )
+        summary = dict(
+            mean=format_uncertainty(v.mean, v.std),
+            median=format_num(v.median, place - 1),
+            best=format_num(v.best, place - 1),
+            lo68=format_num(v.p68[0], place),
+            hi68=format_num(v.p68[1], place),
+            loci=format_num(v.p95[0], place),
+            hici=format_num(v.p95[1], place),
+            parameter=v.label,
+            index=v.index,
+        )
+        s.append(
+            "%(index)2d %(parameter)20s %(mean)10s %(median)7s %(best)7s "
+            "[%(lo68)7s %(hi68)7s] [%(loci)7s %(hici)7s]" % summary
+        )
 
     return "\n".join(s)
 
 
 def save_vars(all_vstats, filename):
-    with open(filename, 'w') as fid:
+    with open(filename, "w") as fid:
         json.dump(
             dict((v.label, v.__dict__) for v in all_vstats),
             fid,
             default=numpy_json,
             sort_keys=True,
             indent=2,
-            )
+        )
+
 
 def numpy_json(o):
     """
@@ -116,18 +223,24 @@ def numpy_json(o):
     To automatically convert numpy data to lists when writing a datastream
     use json.dumps(object, default=numpy_json).
     """
-    try:
+    if isinstance(o, np.integer):
+        return int(o)
+    elif isinstance(o, np.floating):
+        return float(o)
+    elif isinstance(o, np.bool_):
+        return bool(o)
+    elif isinstance(o, np.ndarray):
         return o.tolist()
-    except AttributeError:
-        raise TypeError
+    else:
+        raise TypeError(f"unexpected type found: {type(o)}, {o}")
 
-VAR_PATTERN = re.compile(r"""
+
+VAR_PATTERN = re.compile(
+    r"""
    ^\ *
    (?P<parnum>[0-9]+)\ +
    (?P<parname>.+?)\ +
-   (?P<mean>[0-9.-]+?)
-   \((?P<err>[0-9]+)\)
-   (e(?P<exp>[+-]?[0-9]+))?\ +
+   (?P<mean_with_std>[0-9.-]+?\([0-9.]+\)(e[+-]?[0-9]+)?)\ +
    (?P<median>[0-9.eE+-]+?)\ +
    (?P<best>[0-9.eE+-]+?)\ +
    \[\ *(?P<lo68>[0-9.eE+-]+?)\ +
@@ -135,7 +248,9 @@ VAR_PATTERN = re.compile(r"""
    \[\ *(?P<lo95>[0-9.eE+-]+?)\ +
    (?P<hi95>[0-9.eE+-]+?)\]
    \ *$
-   """, re.VERBOSE)
+   """,
+    re.VERBOSE,
+)
 
 
 def parse_var(line):
@@ -145,20 +260,28 @@ def parse_var(line):
     """
     m = VAR_PATTERN.match(line)
     if m:
-        exp = int(m.group('exp')) if m.group('exp') else 0
-        return VarStats(index=int(m.group('parnum')),
-                        name=m.group('parname'),
-                        mean=float(m.group('mean')) * 10**exp,
-                        median=float(m.group('median')),
-                        best=float(m.group('best')),
-                        p68=(float(m.group('lo68')), float(m.group('hi68'))),
-                        p95=(float(m.group('lo95')), float(m.group('hi95'))),
-                       )
+        # Parse the full ufloat string (e.g., "1.23(8)" or "1.2346(8)e+06")
+        parsed_value = ufloat_fromstr(m.group("mean_with_std"))
+        mean = parsed_value.nominal_value
+        std = parsed_value.std_dev
+
+        return VarStats(
+            label=m.group("parname"),
+            index=int(m.group("parnum")),
+            p95=(float(m.group("lo95")), float(m.group("hi95"))),
+            p68=(float(m.group("lo68")), float(m.group("hi68"))),
+            median=float(m.group("median")),
+            mean=mean,
+            std=std,
+            best=float(m.group("best")),
+            # TODO: The format_vars line does not show whether the var is integer.
+            # integer=False,
+        )
     else:
         return None
 
 
-def stats(x, weights=None):
+def stats(x, weights=None, x_sort_index=None):
     """
     Find mean and standard deviation of a set of weighted samples.
 
@@ -167,18 +290,22 @@ def stats(x, weights=None):
     in the sample), but this is good enough when the sample size is large.
     """
     if weights is None:
-        x = np.sort(x)
+        if x_sort_index is None:
+            x_sort_index = np.argsort(x)
+        x = x[x_sort_index]
         mean, std = np.mean(x), np.std(x, ddof=1)
     else:
-        mean = np.mean(x*weights)/np.sum(weights)
-        # TODO: this is biased by selection of mean; need an unbiased formula
-        var = np.sum((weights*(x-mean))**2)/np.sum(weights)
+        # Unbiased variance for reliability weights: divide by V1 - V2/V1,
+        # which reduces to N-1 (i.e., ddof=1) when all weights are equal.
+        w_sum = np.sum(weights)
+        mean = np.sum(weights * x) / w_sum
+        var = np.sum(weights * (x - mean) ** 2) / (w_sum - np.sum(weights**2) / w_sum)
         std = np.sqrt(var)
 
     return mean, std
 
 
-def credible_interval(x, ci, weights=None):
+def credible_interval(x, ci, weights=None, x_sort_index=None):
     r"""
     Find the credible interval covering the portion *ci* of the data.
 
@@ -203,23 +330,65 @@ def credible_interval(x, ci, weights=None):
     This function is faster if the inputs are already sorted.
     """
     n = x.size
-    ci = np.asarray(ci, 'd')
-    target = (1 + np.vstack((-ci, +ci))).T/2
+    ci = np.asarray(ci, "d")
+    target = (1 + np.vstack((-ci, +ci))).T / 2
+    if x_sort_index is None:
+        x_sort_index = np.argsort(x)
 
     if weights is None:
-        cdf = np.linspace(0.5/n, 1-0.5/n, n)
-        #cdf = np.linspace(1, n, n)/(n+1)
-        result = np.interp(target, cdf, np.sort(x))
+        cdf = np.linspace(0.5 / n, 1 - 0.5 / n, n)
+        # cdf = np.linspace(1, n, n)/(n+1)
+        result = np.interp(target, cdf, x[x_sort_index])
     else:
-        index = np.argsort(x)
-        x, weights = x[index], weights[index]
-        # convert weights to cdf
-        cdf = np.cumsum(weights)
-        cdf /= cdf[-1]
-        cdf -= 0.5*cdf[0]
-        #cdf *= n/(cdf[-1]*(n+1))
+        x, weights = x[x_sort_index], weights[x_sort_index]
+        # Zero-weight points carry no mass, so don't use them as interpolation nodes.
+        keep = weights > 0
+        x, weights = x[keep], weights[keep]
+        # Place each point at the midpoint of its own mass in the cdf. With
+        # equal weights this is (i - 1/2)/n, matching the unweighted case.
+        cdf = (np.cumsum(weights) - 0.5 * weights) / np.sum(weights)
         result = np.interp(target, cdf, x)
     return result if ci.shape else result[0]
+
+
+def test_weighted_stats():
+    rng = np.random.default_rng(1)
+    ci = [0.95, ONE_SIGMA, 0.0]
+    x = rng.normal(3.0, 2.0, 10000)
+
+    # Constant weights of any scale match the unweighted results.
+    for w in (np.ones_like(x), np.full_like(x, 7.0)):
+        assert np.allclose(stats(x, weights=w), stats(x))
+        assert np.allclose(credible_interval(x, ci, weights=w), credible_interval(x, ci))
+
+    # Zero-weight points are ignored.
+    x_ext = np.hstack((x, [-100.0, 100.0]))
+    w_ext = np.hstack((np.ones_like(x), [0.0, 0.0]))
+    assert np.allclose(stats(x_ext, weights=w_ext), stats(x))
+    assert np.allclose(credible_interval(x_ext, ci, weights=w_ext), credible_interval(x, ci))
+
+    # Each point sits at the middle of its own weight in the cdf, as in the
+    # unweighted case, so a heavy point at x=0 pulls the median toward it.
+    x_heavy = np.array([0.0, 1.0, 2.0, 3.0])
+    w_heavy = np.array([5.0, 1.0, 1.0, 1.0])
+    assert np.allclose(credible_interval(x_heavy, 0.0, weights=w_heavy), [0.5, 0.5])
+
+    # With few points, a zero-weight sample at the edge must not be used as an
+    # interpolation endpoint, which would stretch the interval toward it.
+    x_edge = np.array([-10.0, 0.0, 1.0, 2.0, 3.0, 4.0])
+    w_edge = np.array([0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    assert np.allclose(credible_interval(x_edge, 0.95, weights=w_edge), [0.0, 4.0])
+
+    # Importance sampling: draw from N(0, 2^2) and reweight to N(1, 1).
+    z = rng.normal(0.0, 2.0, 200000)
+    log_w = -0.5 * (z - 1.0) ** 2 + 0.5 * (z / 2.0) ** 2
+    w = np.exp(log_w - log_w.max())
+    mean, std = stats(z, weights=w)
+    assert abs(mean - 1.0) < 0.02 and abs(std - 1.0) < 0.02
+    p95, p68, p0 = credible_interval(z, ci, weights=w)
+    assert np.allclose(p68, [0.0, 2.0], atol=0.03)
+    assert np.allclose(p95, [1.0 - 1.96, 1.0 + 1.96], atol=0.05)
+    assert abs(p0[0] - 1.0) < 0.02
 
 
 def shortest_credible_interval(x, ci=0.95, weights=None):
@@ -259,27 +428,29 @@ def shortest_credible_interval(x, ci=0.95, weights=None):
         # the shortest distance.
         cdf = np.cumsum(weights)
         cdf /= cdf[-1]
-        #jcdf -= 0.5*cdf[0]
+        # jcdf -= 0.5*cdf[0]
         if np.isscalar(ci):
             return _weighted_hpd(x, cdf, ci)
         else:
             return [_weighted_hpd(x, cdf, ci_k) for ci_k in ci]
+
 
 def _unweighted_hpd(x, ci):
     """
     Find shortest credible interval ci in sorted, unweighted x
     """
     n = len(x)
-    size = int(ci*n)
+    size = int(ci * n)
     if size >= n:
         return x[0], x[-1]
     else:
         width = x[size:] - x[:-size]
         index = np.argmin(width)
-        #left, right = x[idx], x[idx+size]
-        left = x[0] if index == 0 else (x[index-1] + x[index])/2
-        right = x[-1] if index+size == n-1 else (x[index+size] + x[index+size+1])/2
+        # left, right = x[idx], x[idx+size]
+        left = x[0] if index == 0 else (x[index - 1] + x[index]) / 2
+        right = x[-1] if index + size == n - 1 else (x[index + size] + x[index + size + 1]) / 2
         return left, right
+
 
 def _weighted_hpd(z, cdf, ci):  # extra one-half interval
     """
@@ -294,6 +465,6 @@ def _weighted_hpd(z, cdf, ci):  # extra one-half interval
     i_right = np.searchsorted(cdf[:-1], p_left + ci)
     z_right = z[i_right]
     index = np.argmin(z_right - z_left)
-    left = z_left[0] if index == 0 else (z_left[index-1] + z_left[index])/2
-    right = z_right[-1] if index+1 == len(z_right) else (z_right[index] + z_right[index+1])/2
+    left = z_left[0] if index == 0 else (z_left[index - 1] + z_left[index]) / 2
+    right = z_right[-1] if index + 1 == len(z_right) else (z_right[index] + z_right[index + 1]) / 2
     return left, right

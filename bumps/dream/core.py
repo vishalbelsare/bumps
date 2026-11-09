@@ -128,78 +128,98 @@ Version 1.0: October 2008  Adaption updated and generalized CR implementation
 
 2010-04-20 Paul Kienzle
 * Convert to python
+Complete changelog on github.com/bumps/bumps
 """
-from __future__ import division, print_function
 
-__all__ = ["Dream"]
+__all__ = ["Dream", "Model"]
 
 import sys
-import os
 import time
 from ctypes import c_double
+from typing import Protocol, List, Sequence, Optional
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .state import MCMCDraw
 from .metropolis import metropolis, metropolis_dr, dr_step
-from .gelman import gelman
-from .crossover import AdaptiveCrossover, LogAdaptiveCrossover
+from .crossover import AdaptiveCrossover, LogAdaptiveCrossover, Crossover
 from .diffev import de_step
 from .bounds import make_bounds_handler
 from .compiled import dll
 from .util import rng
 from .convergence import ks_converged
-from .outliers import identify_outliers
 
 # Everything should be available in state, but lets be lazy for now
-LAST_TIME = 0
+_LAST_TIME = 0
+"""Used by console_monitor to count time until the next update"""
 
 
 def console_monitor(state, pop, logp):
     """
     Print progress of fit on the console.
-    """
-    global LAST_TIME
-    if state.generation == 1:
-        print("#gen", "logp(x)",
-              " ".join("<%s>" % par for par in state.labels))
-        LAST_TIME = time.time()
 
-    current_time = time.time()
-    if current_time >= LAST_TIME + 1:
-        LAST_TIME = current_time
-        print(state.generation, state._best_logp,
-              " ".join("%.15g" % v for v in state._best_x))
+    This is the default update monitor when running DREAM standalone. It is not
+    used by the bumps package.
+    """
+    global _LAST_TIME
+    if state.generation == 1:
+        print("#gen", "logp(x)", " ".join("<%s>" % par for par in state.labels))
+        _LAST_TIME = time.perf_counter()
+
+    current_time = time.perf_counter()
+    if current_time >= _LAST_TIME + 1:
+        _LAST_TIME = current_time
+        print(state.generation, state._best_logp, " ".join("%.15g" % v for v in state._best_x))
         sys.stdout.flush()
 
 
-class Dream(object):
+class Model(Protocol):
+    """
+    Dream model interface definition.
+    """
+
+    labels: List[str]
+    """Labels for all the parameters"""
+    bounds: Sequence[Sequence[float]]
+    """Bounds for each parameter as a pair of sequences of the same length as the labels."""
+
+    def map(self, pop: NDArray) -> NDArray:
+        """
+        Function which takes an array of [k x n] and returns an array of n where k is
+        the number of parameters.  TODO: check if
+        """
+        ...
+
+
+class Dream:
     """
     Data structure containing the details of the running DREAM analysis code.
     """
-    model = None
+
+    model: Model = None
     # Sampling parameters
-    burn = 0
-    draws = 100000
-    thinning = 1
+    burn: int = 0
+    draws: int = 100000
+    thinning: int = 1
     # TODO: change the default outlier test to IQR and control with options
     outlier_test = "none"
-    population = None
+    population: NDArray = None
     #: convergence criteria
-    alpha = 0.01
+    alpha: float = 0.01
     # DE parameters
-    DE_steps = 10
-    DE_pairs = 3
-    DE_eps = 0.05
-    DE_snooker_rate = 0.1
-    DE_noise = 1e-6
-    bounds_style = 'reflect'
+    DE_steps: int = 10
+    DE_pairs: int = 3
+    DE_eps: float = 0.05
+    DE_snooker_rate: float = 0.1
+    DE_noise: float = 1e-6
+    bounds_style: str = "reflect"  # reflect, clip, fold, randomize, none
     # Crossover parameters
-    CR = None
-    CR_spacing = 'linear'  # 'log' or 'linear'
+    CR: Crossover = None
+    CR_spacing: str = "linear"  # 'log' or 'linear'
     # Delay rejection parameters
-    use_delayed_rejection = False
-    DR_scale = 1  # 1-sigma step size using cov of population
+    use_delayed_rejection: bool = False
+    DR_scale: float = 1  # 1-sigma step size using cov of population
     # Local optimizer best fit injection  The optimizer has
     # the following interface:
     #    x, fx = goalseek(mapper, bounds_handler, pop, fpop)
@@ -210,9 +230,9 @@ class Dream(object):
     #    mapper is a function which takes pop and returns fpop
     #    bounds_handler takes pop and forces all points into the range
     goalseek_optimizer = None
-    goalseek_interval = 1e100  # close enough to never
-    goalseek_minburn = 1000
-    state = None # type: MCMCDraw
+    goalseek_interval: int = 2e9  # close enough to never
+    goalseek_minburn: int = 1000
+    state: MCMCDraw = None
 
     def __init__(self, **kw):
         self.monitor = console_monitor
@@ -220,11 +240,11 @@ class Dream(object):
             if hasattr(self, k):
                 setattr(self, k, v)
             else:
-                raise TypeError("Unknown attribute "+k)
+                raise TypeError("Unknown attribute " + k)
 
         self._initialized = False
 
-    def sample(self, state=None, abort_test=lambda: False):
+    def sample(self, state: Optional[MCMCDraw] = None, abort_test=lambda: False):
         """
         Pull the requisite number of samples from the distribution
         """
@@ -238,7 +258,7 @@ class Dream(object):
         return self.state
 
 
-def _run_dream(dream, abort_test=lambda: False):
+def _run_dream(dream: Dream, abort_test=lambda: False):
     """
     Collect posterior distribution samples using DREAM sampler.
     """
@@ -254,100 +274,120 @@ def _run_dream(dream, abort_test=lambda: False):
 
     # Remember the problem dimensions
     n_gen, n_chain, n_var = dream.population.shape
-    n_pop = n_gen*n_chain
+    n_pop = n_gen * n_chain
 
     if dream.CR is None:
-        if dream.CR_spacing == 'log':
+        if dream.CR_spacing == "log":
             dream.CR = LogAdaptiveCrossover(n_var)
         else:  # linear
             dream.CR = AdaptiveCrossover(3)
 
     # Step 2: Calculate posterior density associated with each value in x
-    apply_bounds = make_bounds_handler(dream.model.bounds,
-                                       style=dream.bounds_style)
+    apply_bounds = make_bounds_handler(dream.model.bounds, style=dream.bounds_style)
 
     # Record initial state
     allocate_state(dream)
     state = dream.state
+    # Reset plot portion to 100% during fitting so that the intermediate plots show the
+    # full set of samples.
+    state.portion = 1.0
     state.labels = dream.model.labels
     previous_draws = state.draws
     if previous_draws:
         x, logp = state._last_gen()
+        # Recalculating the likelihood at the start of resume in case the model definition has changed.
+        # This can happen when a fit is aborted, new data is added to the model, and the fit is resumed.
+        # The fit can also be resumed if there are changes to the model code or the constraints as long
+        # the list of fit parameters is the same.
+        # Recompute logp for every chain head on the new likelihood surface before
+        # the Metropolis loop starts.  Without this, stale logp values from the
+        # previous fit (which may be much higher or lower under the new data) are
+        # used as the acceptance baseline, causing all new proposals to be either
+        # universally accepted or universally rejected and freezing the chain.
+        logp = dream.model.map(x)
+        state._gen_current_logp[:] = logp
+        if state._best_x is not None:
+            state._best_logp = float(dream.model.map(state._best_x[None, :])[0])
     else:
         # No initial state, so evaluate initial population
         for x in dream.population:
             apply_bounds(x)
-# ********************** MAP *****************************
+            # ********************** MAP *****************************
             logp = dream.model.map(x)
-            state._generation(new_draws=n_chain, x=x,
-                              logp=logp, accept=n_chain,
-                              force_keep=True)
+            state._generation(new_draws=n_chain, x=x, logp=logp, accept=n_chain, force_keep=True)
             dream.monitor(state, x, logp)
+        # print(f"Initial pop has draws={state.draws} gen={state.generation} pop={dream.population.shape}")
 
     state._update(CR_weight=dream.CR.weight)
 
     # Now start drawing samples
-    #print "previous draws", previous_draws, "new draws", dream.draws+dream.burn
-    last_goalseek = (dream.draws + dream.burn)/n_pop - dream.goalseek_minburn
-    next_goalseek = state.generation + dream.goalseek_interval \
-        if dream.goalseek_optimizer else 1e100
+    # print "previous draws", previous_draws, "new draws", dream.draws+dream.burn
+    last_goalseek = (dream.draws + dream.burn) / n_pop - dream.goalseek_minburn
+    next_goalseek = state.generation + dream.goalseek_interval if dream.goalseek_optimizer else 1e100
 
     if dll:
-        xtry = np.empty((n_chain, n_var), 'd')
-        step_alpha = np.empty(n_chain, 'd')
-        CR_used = np.empty(n_chain, 'd')
+        xtry = np.empty((n_chain, n_var), "d")
+        step_alpha = np.empty(n_chain, "d")
+        CR_used = np.empty(n_chain, "d")
     scale = 1.0
-    #serial_time = parallel_time = 0.
-    #last_time = time.time()
+    # serial_time = parallel_time = 0.
+    # last_time = time.time()
 
     # Make sure that the pop we are drawing doesn't need to be copied before
     # sending it to the compiled C code.
     pop = state._draw_pop()
     assert pop.ctypes.data == np.ascontiguousarray(pop).ctypes.data
 
-    frame = 0
-    next_outlier_test = max(state.Ngen, 2*state.Ngen - 10)
-    next_convergence_test = state.Ngen
+    # frame = 0  # For debugging...
+    next_outlier_test = max(state.Ngen, 2 * state.Ngen - 10)
+    next_convergence_test = state.generation + state.Ngen
     final_gen = dream.draws + dream.burn
+    # print(f"running dream with {dream.draws} draws and {dream.burn} burn; final gen={final_gen} draws={state.draws} gen={state.generation}")
     while state.draws < final_gen:
-
         # Age the population using differential evolution
         dream.CR.reset()
-        CR = np.ascontiguousarray(np.vstack((dream.CR.CR, dream.CR.weight)).T, 'd')
+        CR = np.ascontiguousarray(np.vstack((dream.CR.CR, dream.CR.weight)).T, "d")
         for gen in range(dream.DE_steps):
-
             # Define the current locations and associated posterior densities
             xold, logp_old = x, logp
             pop = state._draw_pop()
-            #print(pop.ctypes.data, np.ascontiguousarray(pop).ctypes.data)
-            #print(pop)
-            #print("gen", gen, pop.shape)
+            # print(pop.ctypes.data, np.ascontiguousarray(pop).ctypes.data)
+            # print(pop)
+            # print("gen", gen, pop.shape)
 
             # Generate candidates for each sequence
             if dll is None:
-                xtry, step_alpha, CR_used \
-                    = de_step(n_chain, pop, CR,
-                              max_pairs=dream.DE_pairs,
-                              eps=dream.DE_eps,
-                              snooker_rate=dream.DE_snooker_rate,
-                              noise=dream.DE_noise,
-                              scale=scale)
+                xtry, step_alpha, CR_used = de_step(
+                    n_chain,
+                    pop,
+                    CR,
+                    max_pairs=dream.DE_pairs,
+                    eps=dream.DE_eps,
+                    snooker_rate=dream.DE_snooker_rate,
+                    noise=dream.DE_noise,
+                    scale=scale,
+                )
             else:
-                dll.de_step(n_chain, n_var, len(CR),
-                            pop.ctypes, CR.ctypes,
-                            dream.DE_pairs,
-                            c_double(dream.DE_eps),
-                            c_double(dream.DE_snooker_rate),
-                            c_double(dream.DE_noise),
-                            c_double(scale),
-                            xtry.ctypes, step_alpha.ctypes, CR_used.ctypes)
-            #print("try", xtry)
-
+                dll.de_step(
+                    n_chain,
+                    n_var,
+                    len(CR),
+                    pop.ctypes,
+                    CR.ctypes,
+                    dream.DE_pairs,
+                    c_double(dream.DE_eps),
+                    c_double(dream.DE_snooker_rate),
+                    c_double(dream.DE_noise),
+                    c_double(scale),
+                    xtry.ctypes,
+                    step_alpha.ctypes,
+                    CR_used.ctypes,
+                )
+            # print("try", xtry)
 
             # PAK: Try a local optimizer every N generations
             if next_goalseek <= state.generation <= last_goalseek:
-                best, logp_best = dream.goalseek_optimizer(
-                    dream.model.map, apply_bounds, xold, logp_old)
+                best, logp_best = dream.goalseek_optimizer(dream.model.map, apply_bounds, xold, logp_old)
                 xtry[0] = best
                 # Note: it is slightly inefficient to throw away logp_best,
                 # but it makes the the code cleaner if we do
@@ -355,21 +395,18 @@ def _run_dream(dream, abort_test=lambda: False):
 
             # Compute the likelihood of the candidates
             apply_bounds(xtry)
-# ********************** MAP *****************************
-            #next_time = time.time()
-            #serial_time += next_time - last_time
-            #last_time = next_time
+            # ********************** MAP *****************************
+            # next_time = time.time()
+            # serial_time += next_time - last_time
+            # last_time = next_time
             logp_try = dream.model.map(xtry)
-            #next_time = time.time()
-            #parallel_time  += next_time - last_time
-            #last_time = next_time
+            # next_time = time.time()
+            # parallel_time  += next_time - last_time
+            # last_time = next_time
             draws = len(logp_try)
 
             # Apply the metropolis acceptance/rejection rule
-            x, logp, alpha, accept \
-                = metropolis(xtry, logp_try,
-                             xold, logp_old,
-                             step_alpha)
+            x, logp, alpha, accept = metropolis(xtry, logp_try, xold, logp_old, step_alpha)
 
             # Process delayed rejection
             # PAK NOTE: this updates according to the covariance matrix of the
@@ -386,28 +423,33 @@ def _run_dream(dream, abort_test=lambda: False):
                 # Compute the likelihood of the new candidates
                 reject = ~accept
                 apply_bounds(xdr)
-# ********************** MAP *****************************
+                # ********************** MAP *****************************
                 logp_xdr = dream.model.map(xdr[reject])
                 draws += len(logp_xdr)
 
                 # Apply the metropolis delayed rejection rule.
-                x[reject], logp[reject], alpha[reject], accept[reject] = \
-                    metropolis_dr(xtry[reject], logp_try[reject],
-                                  x[reject], logp[reject],
-                                  xold[reject], logp_old[reject],
-                                  alpha[reject], r)
+                x[reject], logp[reject], alpha[reject], accept[reject] = metropolis_dr(
+                    xtry[reject],
+                    logp_try[reject],
+                    x[reject],
+                    logp[reject],
+                    xold[reject],
+                    logp_old[reject],
+                    alpha[reject],
+                    r,
+                )
 
             # els = zip(logp_old, logp_try, logp, x[:, -2], x[:, -1], accept)
-            #print "pop", "\n ".join((("%12.3e "*(len(el)-1))%el[:-1])
+            # print "pop", "\n ".join((("%12.3e "*(len(el)-1))%el[:-1])
             #                       +("T " if el[-3]<=el[-2] else "  ")
             #                       +("accept" if el[-1] else "")
             #                       for el in els)
 
             # Update Sequences with the new population.
             state._generation(draws, x, logp, accept)
-# ********************** NOTIFY **************************
+            # ********************** NOTIFY **************************
             dream.monitor(state, x, logp)
-            #print state.generation, ":", state._best_logp
+            # print state.generation, ":", state._best_logp
 
             # Keep track of which CR ratios were successful
             if state.draws <= dream.burn:
@@ -416,7 +458,7 @@ def _run_dream(dream, abort_test=lambda: False):
             if abort_test():
                 break
 
-        #print("serial&parallel",serial_time,parallel_time)
+        # print("serial&parallel",serial_time,parallel_time)
         # End of differential evolution aging
         # ---------------------------------------------------------------------
 
@@ -424,18 +466,20 @@ def _run_dream(dream, abort_test=lambda: False):
         state._update(CR_weight=dream.CR.weight)
 
         if abort_test():
+            # print("<<< DREAM abort >>>")
             break
 
-        #if state.draws <= 0.1 * dream.draws:
+        # if state.draws <= 0.1 * dream.draws:
         if state.draws <= dream.burn:
             # Adapt the crossover ratio, but only during burn-in.
             dream.CR.adapt()
 
         if False:
-            # Suppress scale update until we have a chance to verify that it
+            # TODO: Suppress scale update until we have a chance to verify that it
             # doesn't skew the resulting statistics.
+            # TODO: scale needs to be stored in state in order for resume to work correctly.
             _, r = state.acceptance_rate()
-            ravg = np.mean(r[-dream.DE_steps:])
+            ravg = np.mean(r[-dream.DE_steps :])
             if ravg > 0.4:
                 scale *= 1.01
             elif ravg < 0.2:
@@ -443,6 +487,7 @@ def _run_dream(dream, abort_test=lambda: False):
 
         if state.generation >= next_convergence_test:
             converged = ks_converged(state, alpha=dream.alpha)
+            # print(f"ks convergence for α={dream.alpha} is {converged}")
         else:
             converged = False
 
@@ -450,33 +495,34 @@ def _run_dream(dream, abort_test=lambda: False):
         # Only do this once per frame, and only if there is some time
         # left to adapt the distribution.  Also do it if we believe
         # that we have converged.
-        if ((converged or state.generation >= next_outlier_test)
-                and state.generation + state.Ngen < final_gen):
+        if (converged or state.generation >= next_outlier_test) and state.generation + state.Ngen < final_gen:
             outliers = state.remove_outliers(x, logp, dream.outlier_test)
-            next_outlier_test = state.generation + 2*state.Ngen
+            next_outlier_test = state.generation + 2 * state.Ngen
             if len(outliers):
                 # TODO: use monitors to report arbitrary information
-                print("step %d trimmed %d outliers from %d chains"
-                      % (state.generation, len(outliers), len(logp)))
+                print("step %d trimmed %d outliers from %d chains" % (state.generation, len(outliers), len(logp)))
                 next_convergence_test = state.generation + state.Ngen
                 converged = False
 
         if converged:
-            #_show_logp_frame(dream, state, frame+1)
+            # print("<<< DREAM converged >>>")
+            # _show_logp_frame(dream, state, frame+1)
             break
 
         # Draw the next frame (for debugging...)
-        next_frame = state.generation // state.Ngen
-        #if frame != next_frame: _show_logp_frame(dream, state, next_frame)
-        frame = next_frame
+        # next_frame = state.generation // state.Ngen
+        # if frame != next_frame: _show_logp_frame(dream, state, next_frame)
+        # frame = next_frame
+
 
 def _show_logp_frame(dream, state, frame):
-    from pylab import clf, savefig
+    import matplotlib.pyplot as plt
     from . import views
-    clf()
+
+    plt.clf()
     views.plot_logp(state)
-    savefig('logp%03d.png'%frame)
-    clf()
+    plt.savefig("logp%03d.png" % frame)
+    plt.clf()
 
 
 def allocate_state(dream):
@@ -490,15 +536,13 @@ def allocate_state(dream):
     n_cr = len(dream.CR.CR)
     draws = dream.draws
 
-    n_update = int(draws/(steps*n_chain)) + 1
+    n_update = int(np.ceil(draws / (steps * n_chain)))
     n_gen = n_update * steps
-    n_thin = int(n_gen/thinning) + 1
+    n_thin = int(np.ceil(n_gen / thinning))
 
-    #print("new state", n_var, n_chain, n_cr, n_gen, n_thin, n_update, draws, steps)
+    # print("new state", n_var, n_chain, n_cr, n_gen, n_thin, n_update, draws, steps)
     if dream.state is not None:
-        #print("existing", dream.state.Nvar, dream.state.Npop, dream.state.Ncr)
-        dream.state.resize(
-            n_gen, n_thin, n_update, n_var, n_chain, n_cr, thinning)
+        # print("existing", dream.state.Nvar, dream.state.Npop, dream.state.Ncr)
+        dream.state.resize(n_gen, n_thin, n_update, n_var, n_chain, n_cr, thinning)
     else:
-        dream.state = MCMCDraw(
-            n_gen, n_thin, n_update, n_var, n_chain, n_cr, thinning)
+        dream.state = MCMCDraw(n_gen, n_thin, n_update, n_var, n_chain, n_cr, thinning)

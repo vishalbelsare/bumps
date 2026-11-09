@@ -21,46 +21,63 @@ that have been evaluated and their values using the system logger
 and an optimizer may require a certain amount of history to calculate
 the next set of values.
 
-New traces are provided using :meth:`History.provides`.  For example,
+New traces are defined using :meth:`History.provides`.  For example,
 the following adds traces for 'value' and 'point' to the history, and
-requires the best value on the two previous cycles in order to do its work:
+requires the value on the two previous cycles in order to do its work:
 
     >>> from bumps.history import History
-    >>> h = History()
-    >>> h.provides(value=2, point=0)
+    >>> h = History(value=2, point=0) # keep two values and zero points
 
 Initially the history is empty:
 
     >>> print(len(h.value))
     0
 
-After three updates we see that only two values are kept:
+After three updates we see that only two values are kept.
 
-    >>> h.update(value=2,point=[1,1,1])
-    >>> h.update(value=1,point=[1,0.5,1])
-    >>> h.update(value=0.5,point=[1,0.5,0.9])
+    >>> h.update(value=2.6, point=[1,1,1])
+    >>> h.update(value=1, point=[1,0.5,1])
+    >>> h.update(value=0.5, point=[1,0.5,0.9])
     >>> print(h.value)
     Trace value: 0.5, 1
     >>> print(len(h.value))
     2
 
-Note that point is not monitored since it is not required:
+Since the required length of 'point' is zero no values are kept:
 
     >>> print(h.point[0])
     Traceback (most recent call last):
         ...
     IndexError: point has not accumulated enough history
 
-Traces may be used as accumulators.  In that case, the next
-value is added to the tail value before appending to the trace.
-For example:
+A history consumer can override this, and require a certain length of a trace.
+Then future values will be preserved:
 
-    >>> h = History()
-    >>> h.provides(step=1)
+    >>> h.requires(point=1)
+    >>> h.update(value=0.25, point=[1,0.5,0.92])
+    >>> print(h.point[0])
+    [1, 0.5, 0.92]
+
+Traces are independent of each other. A new trace can be added to the history
+and updated separately from the existing traces. This can be handy if there
+are separate sources of history though it may be difficult to keep the in sync.
+The following adds a 'step' to the existing history, initialized to 15, without
+changing 'value' or 'point':
+
+    >>> h.provides(step=2) # keep two steps
+    >>> h.update(step=15) # initialize step to 15
+    >>> print(h.step)
+    Trace step: 15
+
+Traces may be used as accumulators, with the delta added to the existing value
+before being stored in the trace. For example:
+
     >>> h.accumulate(step=1)
-    >>> h.accumulate(step=1)
-    >>> print(h.step[0])
-    2
+    >>> print(h.step)
+    Trace step: 16, 15
+
+Within bumps, history is used by monitors, with bumps.fitters.MonitorRunner
+managing updates to history and feeding them to the fit progress monitors.
 """
 
 # Design questions:
@@ -70,7 +87,6 @@ For example:
 
 
 class History(object):
-
     """
     Collection of traces.
 
@@ -89,10 +105,10 @@ class History(object):
         """
         for k, v in kw.items():
             # Make sure the additional trait is not already provided.
-            # This test should also catch methods such as provides/requires
+            # This test will also catch methods such as provides/requires
             # and static properties such as bounds that are set from outside.
             if hasattr(self, k):
-                raise AttributeError("history already provides " + k)
+                raise AttributeError("History already provides " + k)
             else:
                 mon = self._new_trace(keep=v, name=k)
                 setattr(self, k, mon)
@@ -106,8 +122,7 @@ class History(object):
                 mon = getattr(self, k)
                 mon.requires(v)
             except AttributeError:
-                raise AttributeError("history does not provide " + k
-                                     + "\nuse one of " + self._trace_names())
+                raise AttributeError("history does not provide " + k + "\nuse one of " + self._trace_names())
 
     def accumulate(self, **kw):
         """
@@ -147,9 +162,7 @@ class History(object):
         return Trace(keep=keep, name=name)
 
     def _traces(self):
-        return [trace
-                for trace in self.__dict__.values()
-                if isinstance(trace, Trace)]
+        return [trace for trace in self.__dict__.values() if isinstance(trace, Trace)]
 
     def _trace_names(self):
         traces = [trace.name for trace in self._traces()]
@@ -163,6 +176,7 @@ class History(object):
         """
         Return a dictionary of traces { 'name':  [v[n], v[n-1], ..., v[0]] }
         """
+        # print("history snapshot", self._traces(), self.__dict__)
         return dict((trace.name, trace.snapshot()) for trace in self._traces())
 
     def restore(self, state):
@@ -177,7 +191,6 @@ class History(object):
 
 
 class Trace(object):
-
     """
     Value trace.
 
@@ -195,6 +208,7 @@ class Trace(object):
     Note that snapshot/restore uses lists to represent numpy arrays, which
     may cause problems if the trace is capturing lists.
     """
+
     # Implementation note:
     # Traces are stored in reverse order because append is faster than insert.
     # This detail is hidden from the caller since __getitem__ returns the
@@ -241,8 +255,7 @@ class Trace(object):
 
     def __getitem__(self, key):
         if key < 0:
-            raise IndexError(self.name
-                             + " can only be accessed from the beginning")
+            raise IndexError(self.name + " can only be accessed from the beginning")
         try:
             return self._storage[-key - 1]
         except IndexError:
@@ -252,8 +265,7 @@ class Trace(object):
         raise TypeError("cannot write directly to a trace; use put instead")
 
     def __str__(self):
-        return ("Trace " + self.name + ": "
-                + ", ".join([str(k) for k in reversed(self._storage)]))
+        return "Trace " + self.name + ": " + ", ".join([str(k) for k in reversed(self._storage)])
 
     def snapshot(self):
         """
@@ -263,6 +275,7 @@ class Trace(object):
         converted to json.
         """
         import numpy as np
+
         if isinstance(self._storage[0], np.ndarray):
             return [v.tolist() for v in self._storage]
         else:
@@ -275,9 +288,10 @@ class Trace(object):
         Lists are converted to numpy arrays.
         """
         import numpy as np
+
         if isinstance(state[0], list):
             state = [np.asarray(v) for v in state]
         if len(state) > self.keep:
-            self._storage = state[-self.keep:]
+            self._storage = state[-self.keep :]
         else:
             self._storage = state[:]

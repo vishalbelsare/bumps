@@ -1,7 +1,7 @@
 import numpy as np
 
+
 def plot(draw, nlines=150, control_var=None):
-    # type: (Draw) -> None
     """
     Plot parallel coordinates from a draw from the distribution.
 
@@ -11,7 +11,7 @@ def plot(draw, nlines=150, control_var=None):
 
     If *control_var* is provided, then the best value from each bin in the
     histogram for that variable will be chosen as a line to draw on the
-    coordination plot. This will will produce a roughly equally spaced set of
+    coordination plot. This will produce a roughly equally spaced set of
     coordination points for that variable. If *control_var* is None, then
     lines will be picked at random.
     """
@@ -22,12 +22,12 @@ def plot(draw, nlines=150, control_var=None):
     # TODO: confirm that plot is called with 95% interval draw
     # Note: the 95% interval draw is based on the range of the data?
     # Drop points outside the 95% interval of chisq
-    #index = np.argsort(logp)
-    #npoints = data.shape[0]
-    #maxn = int(npoints*0.95)
-    #index = index[:maxn]
-    #logp = logp[index]
-    #data = data[index]
+    # index = np.argsort(logp)
+    # npoints = data.shape[0]
+    # maxn = int(npoints*0.95)
+    # index = index[:maxn]
+    # logp = logp[index]
+    # data = data[index]
 
     # TODO: order data by strength of correlation
     # Some options:
@@ -36,19 +36,18 @@ def plot(draw, nlines=150, control_var=None):
     #    distance (Szekely, 2005) doi:10.1214/009053607000000505
     #    HGG (Heller, Heller, Gorfine, 2013) doi:10.1093/biomet/ass070
     # estimate correlations
-    #corr = matrix_corr(data)
-    #order = list(range(data.shape[1]))
-    #data = data[order]
+    # corr = matrix_corr(data)
+    # order = list(range(data.shape[1]))
+    # data = data[order]
 
     if control_var is None:
         index = np.random.choice(data.shape[0], size=nlines, replace=False)
     else:
         index = best_in_bin(data[:, control_var], -logp, bins=nlines)
-    #color_value, color_label = data[index, var], labels[var]
+    # color_value, color_label = data[index, var], labels[var]
     color_value, color_label = -logp[index], "-log(P)"
-    parallel_coordinates(
-        data[index], labels=labels,
-        value=color_value, value_label=color_label)
+    parallel_coordinates(data[index], labels=labels, value=color_value, value_label=color_label)
+
 
 def best_in_bin(x, value, bins=50, range=None, keep_empty=False):
     """
@@ -71,47 +70,51 @@ def best_in_bin(x, value, bins=50, range=None, keep_empty=False):
     This list may be shorter than the number of bins if *keep_empty* is False.
 
     The algorithm works by assigning a bin number to each point then adding
-    an offset in [0, 1) according to the scaled *value*.  These point values
+    an offset in [0, 0.99] according to the scaled *value*.  These point values
     are then sorted, and searched by bin number.  The returned index will
-    correspond to the first value in each bin, and therefore, the best value
+    correspond to the first value in each bin, and therefore, the lowest value
     in that bin.  From this the index into the original list can be returned.
     """
 
-    # Find bin number for each value.
+    # If all x are identical then bin by value instead of x. This will give
+    # a representative sample across the credible range.
+    if (x == x[0]).all():
+        x = value
+
+    # Find the bin index for each coordinate value. This may put multiple
+    # values in each bin, and some bins may be empty.
     if isinstance(bins, int):
         # Find intervals for x and use integer division to assign bin number.
         # Don't worry that this might create bin numbers such as -3 or nbins+5
         # since these will be ignored during bin lookup.
         xmin, xmax = range if range is not None else (np.min(x), np.max(x))
-        dx = (xmax - xmin)/bins
-        value_in_bin = (x - xmin)//dx if dx != 0.0 else np.full_like(x, bins//2)
+        dx = (xmax - xmin) / (bins - 1)
+        bin_index = (x - xmin) // dx
         nbins = bins
     else:
         # Lookup x in bin edges. searchsorted returns index 0 for elements
         # before the first edge so we need to put an extra start edge and
         # subtract one from the index so that bin number is -1 before first.
-        value_in_bin = np.searchsorted(np.hstack((-np.inf, bins)), x) - 1
+        bin_index = np.searchsorted(np.hstack((-np.inf, bins)), x) - 1
         nbins = len(bins) - 1
 
-    # Increment bin number offset using scaled value.  Limit the scaled
-    # value to 0.99 rather 1.0 so that the worst value isn't 1.0, which
-    # will be the best value in the next bin.
-    value_in_bin += scale(value)*0.99
+    # Adjust each index by value in [0.0, 0.99]
+    bin_index += zero_one_norm(value) * 0.99
 
-    # Sort values, preserving original indices
-    sort_index = np.argsort(value_in_bin)
-    sorted_value_in_bin = value_in_bin[sort_index]
+    # Sort the adjusted indices, preserving original
+    sort_index = np.argsort(bin_index)
+    sorted_bin_index = bin_index[sort_index]
 
     # Lookup first point in each bin, which will now by the min chisq in bin.
     bin_numbers = np.arange(nbins)
-    min_index = np.searchsorted(sorted_value_in_bin, bin_numbers)
+    min_index = np.searchsorted(sorted_bin_index[:-1], bin_numbers)
 
     # Find the point number for the best points in the original list.
     index = sort_index[min_index]
 
-    # Indentify empty bins. This will occur if base value returned by
+    # Identify empty bins. This will occur if base value returned by
     # search sorted does not match the bin number.
-    empty = np.floor(sorted_value_in_bin[min_index]) != bin_numbers
+    empty = np.floor(sorted_bin_index[min_index]) != bin_numbers
 
     # Process empty bins.
     if keep_empty:
@@ -120,6 +123,7 @@ def best_in_bin(x, value, bins=50, range=None, keep_empty=False):
         index = index[~empty]
 
     return index
+
 
 def parallel_coordinates(data, labels=None, value=None, value_label=""):
     """
@@ -140,18 +144,17 @@ def parallel_coordinates(data, labels=None, value=None, value_label=""):
 
     ndim = data.shape[1]
     if labels is None:
-        labels = ['p%d'%k for k in range(ndim)]
+        labels = ["p%d" % k for k in range(ndim)]
 
     x = np.arange(ndim)
-    data = scale(data, axis=0)
+    data = zero_one_norm(data, axis=0)
 
     # We need to set the plot limits, they will not autoscale
     fig, ax = plt.gcf(), plt.gca()
-    ax.set_xlim(0, ndim-1)
+    ax.set_xlim(0, ndim - 1)
     ax.set_ylim(0, 1)
     plt.xticks(x, labels, rotation=30)
-    lines = LineCollection([np.column_stack([x, y]) for y in data],
-                           linewidths=1, linestyles='solid')
+    lines = LineCollection([np.column_stack([x, y]) for y in data], linewidths=1, linestyles="solid")
     ax.add_collection(lines)
     ax.set_yticklabels([])
 
@@ -161,16 +164,17 @@ def parallel_coordinates(data, labels=None, value=None, value_label=""):
         cbar.set_label(value_label)
         plt.sci(lines)
 
-def scale(x, axis=None):
+
+def zero_one_norm(value, axis=None):
     """
     Returns *x* with values scaled to [0, 1].
 
     If *axis* is not None, then scale values within each axis independently,
     otherwise use the min/max value across all dimensions.
     """
-    low = x.min(axis=axis, keepdims=True)
-    high = x.max(axis=axis, keepdims=True)
-    dx = high - low
-    dx[dx == 0.0] = 1.0
-    scaled = (x - low)/dx
+    low = value.min(axis=axis, keepdims=True)
+    high = value.max(axis=axis, keepdims=True)
+    diff = high - low
+    diff[diff == 0.0] = 1.0  # If all values are the same, scaled will be all zeros.
+    scaled = (value - low) / diff
     return scaled

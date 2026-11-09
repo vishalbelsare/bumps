@@ -33,9 +33,8 @@ Weighted system::
     >>> dy = [0.2,0.01,0.1]
     >>> y = [ 14.16, 13.01, 6.15]
     >>> s = wsolve.wsolve(A,y,dy)
-    >>> print(", ".join("%0.2f +/- %0.2f"%(a,b) for a,b in zip(s.x,s.std)))
+    >>> print(", ".join(f"{a:0.2f} +/- {b:0.2f}" for a,b in zip(s.x[:, 0],s.std)))
     1.05 +/- 0.17, 2.20 +/- 0.12, 2.91 +/- 0.12
-
 
 Note there is a counter-intuitive result that scaling the estimated
 uncertainty in the data does not affect the computed uncertainty in
@@ -49,7 +48,7 @@ information about the variance in the data, and the weight vector
 serves only to provide relative weighting between the points.
 """
 
-__all__ = ['wsolve', 'wpolyfit', 'LinearModel', 'PolynomialModel']
+__all__ = ["wsolve", "wpolyfit", "LinearModel", "PolynomialModel"]
 
 # FIXME: test second example
 #
@@ -81,7 +80,7 @@ class LinearModel(object):
     mean at $x$.  It should get smaller as you increase the number of
     measurements.  Error bars in the physical sciences usually show
     a $1-\alpha$ confidence value of $\text{erfc}(1/\sqrt{2})$, representing
-    a $1-\sigma$ standand deviation of uncertainty in the mean.
+    a $1-\sigma$ standard deviation of uncertainty in the mean.
 
     Confidence intervals for the expected value of the linear system
     evaluated at a new point $w$ are given by the $t$ distribution for
@@ -106,6 +105,7 @@ class LinearModel(object):
 
         \text{var}(w) = \sigma^2 (1 + w^T (A^TA)^{-1} w)
     """
+
     def __init__(self, x=None, DoF=None, SVinv=None, rnorm=None):
         # Note: SVinv should be computed from S,V where USV' = A
         #: solution to the equation $Ax = y$
@@ -131,13 +131,13 @@ class LinearModel(object):
         """covariance matrix [inv(A'A); O(n^3)]"""
         # FIXME: don't know if we need to scale by C, but it will
         # at least make things consistent
-        C = self.rnorm**2/self.DoF if self.DoF > 0 else 1
+        C = self.rnorm**2 / self.DoF if self.DoF > 0 else 1
         return C * np.dot(self._SVinv, self._SVinv.T)
 
     @property
     def var(self):
         """solution variance [diag(cov); O(n^2)]"""
-        C = self.rnorm**2/self.DoF if self.DoF > 0 else 1
+        C = self.rnorm**2 / self.DoF if self.DoF > 0 else 1
         return C * np.sum(self._SVinv**2, axis=1)
 
     @property
@@ -149,7 +149,8 @@ class LinearModel(object):
     def p(self):
         """p-value probability of rejection"""
         from scipy.stats import chi2  # lazy import in case scipy not present
-        return chi2.sf(self.rnorm ** 2, self.DoF)
+
+        return chi2.sf(self.rnorm**2, self.DoF)
 
     def _interval(self, X, alpha, pred):
         """
@@ -181,8 +182,9 @@ class LinearModel(object):
         # Note: sqrt(F(1-a;1,df)) = T(1-a/2;df)
         #
         from scipy.stats import t  # lazy import in case scipy not present
+
         y = np.dot(X, self.x).ravel()
-        s = t.ppf(1-alpha/2, self.DoF) * self.rnorm/np.sqrt(self.DoF)
+        s = t.ppf(1 - alpha / 2, self.DoF) * self.rnorm / np.sqrt(self.DoF)
         t = np.dot(X, self._SVinv)
         dy = s * np.sqrt(pred + np.sum(t**2, axis=1))
         return y, dy
@@ -198,6 +200,7 @@ class LinearModel(object):
         where $\alpha = \text{erfc}(\sigma/\sqrt{2})$.
         """
         from scipy.special import erfc  # lazy import in case scipy not present
+
         alpha = erfc(sigma / np.sqrt(2))
         return self._interval(np.asarray(A), alpha, 0)
 
@@ -240,7 +243,7 @@ def wsolve(A, y, dy=1, rcond=1e-12):
     # Since dy is a row vector, this divides each row of A by the corresponding
     # element of dy.
     if dy.ndim == 2:
-        A, y = A/dy, y/dy
+        A, y = A / dy, y / dy
 
     # Singular value decomposition: A = U S V.H
     # Since A is an array, U, S, VH are also arrays
@@ -249,7 +252,7 @@ def wsolve(A, y, dy=1, rcond=1e-12):
 
     # FIXME what to do with ill-conditioned systems?
     # Use regularization? L1 (Lasso), L2 (Ridge) or both (Elastic Net)
-    #if s[-1]<rcond*s[0]: raise ValueError, "matrix is singular"
+    # if s[-1]<rcond*s[0]: raise ValueError, "matrix is singular"
     # s[s<rcond*s[0]] = 0.  # Can't do this because 1/s below will fail
 
     # Solve: x = V inv(S) U.H y
@@ -361,21 +364,22 @@ class PolynomialModel(object):
         # TODO: better polynomial pretty printing using formatnum
         return "Polynomial(%s)" % self.coeff
 
-
     def plot(self, ci=1, pi=0):
-        import pylab
+        import matplotlib.pyplot as plt
+
         min_x, max_x = np.min(self.x), np.max(self.x)
-        padding = (max_x - min_x)*0.1
-        x = np.linspace(min_x-padding, max_x+padding, 200)
+        padding = (max_x - min_x) * 0.1
+        x = np.linspace(min_x - padding, max_x + padding, 200)
         y = self.__call__(x)
-        pylab.errorbar(self.x, self.y, self.dy, fmt='b.')
-        pylab.plot(x, y, 'b-')
+        plt.errorbar(self.x, self.y, self.dy, fmt="b.")
+        plt.plot(x, y, "b-")
         if ci > 0:
             _, cdy = self.ci(x, ci)
-            pylab.plot(x, y + cdy, 'b-.', x, y - cdy, 'b-.')
+            plt.plot(x, y + cdy, "b-.", x, y - cdy, "b-.")
         if pi > 0:
             py, pdy = self.pi(x, pi)
-            pylab.plot(x, y + pdy, 'b-.', x, y - pdy, 'b-.')
+            plt.plot(x, y + pdy, "b-.", x, y - pdy, "b-.")
+
 
 def wpolyfit(x, y, dy=1, degree=None, origin=False):
     r"""
@@ -396,27 +400,29 @@ def demo():
     """
     Fit a random cubic polynomial.
     """
-    import pylab
+    import matplotlib.pyplot as plt
 
     # Make fake data
     x = np.linspace(-15, 5, 15)
-    th = np.polyval([.2, 3, 1, 5], x)  # polynomial
-    dy = np.sqrt(np.abs(th))        # poisson uncertainty estimate
-    y = np.random.normal(th, dy)    # but normal generator
+    th = np.polyval([0.2, 3, 1, 5], x)  # polynomial
+    dy = np.sqrt(np.abs(th))  # poisson uncertainty estimate
+    y = np.random.normal(th, dy)  # but normal generator
 
     # Fit to a polynomial
     poly = wpolyfit(x, y, dy=dy, degree=3)
     poly.plot()
-    pylab.show()
+    plt.show()
+
 
 def demo2():
-    import pylab
+    import matplotlib.pyplot as plt
+
     x = [1, 2, 3, 4, 5]
     y = [10.2, 7.9, 6.9, 4.4, 1.8]
     dy = [1, 3, 1, 0.2, 1.5]
     poly = wpolyfit(x, y, dy=dy, degree=1)
     poly.plot()
-    pylab.show()
+    plt.show()
 
 
 def test():
@@ -424,21 +430,22 @@ def test():
     Check that results are correct for a known problem.
     """
     from numpy.testing import assert_array_almost_equal_nulp
-    x = np.array([0, 1, 2, 3, 4], 'd')
-    y = np.array([2.5, 7.9, 13.9, 21.1, 44.4], 'd')
-    dy = np.array([1.7, 2.4, 3.6, 4.8, 6.2], 'd')
+
+    x = np.array([0, 1, 2, 3, 4], "d")
+    y = np.array([2.5, 7.9, 13.9, 21.1, 44.4], "d")
+    dy = np.array([1.7, 2.4, 3.6, 4.8, 6.2], "d")
     poly = wpolyfit(x, y, dy, 1)
-    px = np.array([1.5], 'd')
+    px = np.array([1.5], "d")
     _, pi = poly.pi(px)  # Same y is returend from pi and ci
     py, ci = poly.ci(px)
 
-    # Uncomment these to show target values
-    # print "Tp = [%.16g, %.16g]"%(p[0],p[1])
-    # print "Tdp = [%.16g, %.16g]"%(dp[0],dp[1])
-    # print "Tpi,Tci = %.16g, %.16g"%(pi,ci)
-    Tp = np.array([7.787249069840737, 1.503992847461524])
+    ## Uncomment these to show target values
+    # print("    Tp = np.array([%.16g, %.16g])"%(tuple(poly.coeff.tolist())))
+    # print("    Tdp = np.array([%.16g, %.16g])"%(tuple(poly.std.tolist())))
+    # print("    Tpi, Tci = %.16g, %.16g"%(pi[0],ci[0]))
+    Tp = np.array([7.787249069840739, 1.503992847461522])
     Tdp = np.array([1.522338103010216, 2.117633626902384])
-    Tpi, Tci = 7.611128464981324, 2.342860389884832
+    Tpi, Tci = 7.611128464981326, 2.34286039211232
 
     perr = np.max(np.abs(poly.coeff - Tp))
     dperr = np.max(np.abs(poly.std - Tdp))
@@ -446,11 +453,14 @@ def test():
     pierr = np.abs(pi - Tpi)
     assert perr < 1e-14, "||p-Tp||=%g" % perr
     assert dperr < 1e-14, "||dp-Tdp||=%g" % dperr
-    assert cierr < 1e-14, "||ci-Tci||=%g" % cierr
-    assert pierr < 1e-14, "||pi-Tpi||=%g" % pierr
+    # TODO: change target error level once scipy 1.13 becomes the norm
+    # Target values are only accurate to 9 digits for scipy < 1.13
+    assert cierr < 1e-8, "||ci-Tci||=%g" % cierr
+    assert pierr < 1e-8, "||pi-Tpi||=%g" % pierr
     assert_array_almost_equal_nulp(py, poly(px), nulp=8)
 
+
 if __name__ == "__main__":
-    #test()
+    # test()
     demo()
-    #demo2()
+    # demo2()

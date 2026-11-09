@@ -18,10 +18,11 @@ Create a main program which looks like::
         import multiprocessing
         multiprocessing.freeze_support()
 
-        import bumps.cli
+        from bumps.plugin import install_plugin
+        from bumps.cli import main as bumps_main
         import mypackage.plugin
-        bumps.cli.install_plugin(mypackage.plugin)
-        bumps.cli.main()
+        install_plugin(mypackage.plugin)
+        bumps_main()
 
 You should be able to use this as a driver program for your application.
 
@@ -32,12 +33,13 @@ only one plugin at a time is supported.
 """
 
 __all__ = [
-    'new_model',
-    'load_model',
-    'calc_errors',
-    'show_errors',
-    'data_view',
-    'model_view',
+    "new_model",
+    "load_model",
+    "calc_errors",
+    "show_errors",
+    "data_view",
+    "model_view",
+    "migrate_serialized",
 ]
 
 # TODO: refl1d wants to do the following after cli.getopts()
@@ -47,6 +49,17 @@ __all__ = [
 #
 # It also wants to modify the opts so that more plotters are available,
 # such as Fresnel.
+
+
+def install_plugin(p):
+    """
+    Replace symbols in :mod:`bumps.plugin` with application specific
+    methods.
+    """
+    symtab = globals()
+    for symbol in __all__:
+        if hasattr(p, symbol):
+            symtab[symbol] = getattr(p, symbol)
 
 
 def new_model():
@@ -83,7 +96,8 @@ def calc_errors(problem, sample):
     return None
 
 
-def show_errors(errs):
+# Note: should be figfile=None rather than save=None
+def show_errors(errs, fig=None, save=None):
     """
     Display the model with uncertainty on the current figure.
 
@@ -100,6 +114,7 @@ def data_view():
     necessary.
     """
     from .gui.data_view import DataView
+
     return DataView
 
 
@@ -110,3 +125,13 @@ def model_view():
     Return None if not present.
     """
     return None
+
+
+def migrate_serialized(model_dict):
+    """
+    Migrate serialized model to the current version.
+
+    This function is called when loading a model from a file.  It is
+    used to update the model to the current version of the plugin.
+    """
+    return model_dict

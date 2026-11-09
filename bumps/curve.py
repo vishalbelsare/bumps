@@ -39,15 +39,23 @@ The model function can then be imported from the external module as usual::
 
     from sin_model import sin_model
 """
+
 __all__ = ["Curve", "PoissonCurve", "plot_err"]
 
 import inspect
 import warnings
+from typing import Callable, Literal, Union, Optional, Any, Dict, List, Callable
+from dataclasses import dataclass
 
 import numpy as np
 from numpy import log, pi, sqrt
+from numpy.typing import ArrayLike
 
-from .parameter import Parameter
+from .util import NDArray
+from .parameter import Parameter, ValueProtocol
+
+# import sys; sys.setrecursionlimit(60)  # For debugging getattr/setattr
+
 
 def _parse_pars(fn, init=None, skip=0, name=""):
     """
@@ -77,7 +85,7 @@ def _parse_pars(fn, init=None, skip=0, name=""):
     sig = inspect.signature(fn)
     params = sig.parameters.values()
     pnames = [p.name for p in params]
-    
+
     valid = [p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) for p in params]
     if not all(valid):
         raise TypeError(f"Only positional and keyword arguments allowed for {fn.__name__}")
@@ -101,30 +109,28 @@ def _parse_pars(fn, init=None, skip=0, name=""):
     # check that they exist as function parameters.
     invalid = set(init.keys()) - set(pnames)
     if invalid:
-        raise TypeError("Invalid initializers: %s" %
-                        ", ".join(sorted(invalid)))
+        raise TypeError("Invalid initializers: %s" % ", ".join(sorted(invalid)))
     defaults.update(init)
 
     # Build parameters out of ranges and initial values
     # maybe:  name=(p+name if name.startswith('_') else name+p)
-    pars = dict((p, Parameter.default(defaults[p], name=name + p))
-                for p in pnames if p not in state_vars)
+    pars = dict((p, Parameter.default(defaults[p], name=name + p)) for p in pnames if p not in state_vars)
 
     state = dict((p, v) for p, v in defaults.items() if p in state_vars)
 
-    #print("pars", pars)
-    #print("state", state)
+    # print("pars", pars)
+    # print("state", state)
     return pars, state
 
-def _assign_pars(obj, pars):
-    # Make parameters accessible as model attributes
-    for k, v in pars.items():
-        if hasattr(obj, k):
-            raise TypeError("Parameter cannot be named %s" % k)
-        setattr(obj, k, v)
 
-
-class Curve(object):
+# TODO: separate the dataclass from the builder function
+# As currently implemented we need artificial parameters
+# "pars" and "state" to allow deserialization of the dataclass
+# but these are parameters that the user should never touch.
+# Instead, define a cleaner Curve object which can be dumped
+# and loaded independent of the calling parameters.
+@dataclass(init=False, eq=False)
+class Curve:
     r"""
     Model a measurement with a user defined function.
 
@@ -155,9 +161,9 @@ class Curve(object):
       defined as *plot(x,y,dy,fy,\*\*kw)*. The keyword arguments will be
       filled with the values of the parameters used to compute *fy*.  It
       will be easiest to list the parameters you need to make your plot
-      as positional arguments after *x,y,dy,fy* in the plot function
-      declaration.  For example, *plot(x,y,dy,fy,p3,\*\*kw)* will make the
-      value of parameter *p3* available as a variable in your function.  The
+      as arguments after *x,y,dy,fy* in the plot function declaration.
+      For example, *plot(x,y,dy,fy,p3,\*\*kw)* will make the value of
+      parameter *p3* available as a variable in your function.  The
       special keyword *view* will be a string containing *linear*, *log*,
       *logx*, or *loglog*.  If only showing the residuals, the string
       will be *residual*.
@@ -177,11 +183,43 @@ class Curve(object):
     subclass Curve and replace nllf with the correct probability given the
     residuals.  See the implementation of :class:`PoissonCurve` for an example.
     """
-    def __init__(self, fn, x, y, dy=None, name="", labels=None,
-                 plot=None, plot_x=None, **kwargs):
+
+    # TODO: Add resolution and uncertainty in x. Resolution will require oversampling.
+    # TODO: Move data into its own class (pre 1.0?)
+    # The data class can deal with x, y, dy, resolution, jitter, plotter, plot_x, labels
+    fn: Callable
+    x: NDArray
+    y: NDArray
+    dy: NDArray
+    """Data uncertainty"""
+    name: str
+    """Name of the model"""
+    pars: Dict[str, Parameter] = None  # Needs to be None initially for getattr/setattr to work
+    """Fittable parameters to the model"""
+    state: Dict[str, Any]
+    """Nonfittable parameters set during initialization. Values should be serializable."""
+    labels: List[str]
+    plot_x: Optional[NDArray]
+    plotter: Optional[Callable]
+
+    def __init__(
+        self,
+        fn: Callable,
+        x: ArrayLike,
+        y: ArrayLike,
+        dy: Optional[ArrayLike] = None,
+        name: Optional[str] = "",
+        labels: Optional[List[str]] = None,
+        plotter: Optional[Callable[..., None]] = None,
+        plot_x: Optional[NDArray] = None,
+        plot: Optional[Callable] = None,
+        pars: Optional[Dict[str, Parameter]] = None,
+        state: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
         self.x, self.y = np.asarray(x), np.asarray(y)
         if dy is None:
-            self.dy = 1
+            self.dy = np.ones_like(y)
         else:
             self.dy = np.asarray(dy)
             if (self.dy <= 0).any():
@@ -195,32 +233,38 @@ class Curve(object):
 
         # interpret labels parameter
         if labels is None:
-            labels = ['x', 'y']
-        elif len(labels) < 2 or len(labels) != num_curves+2:
+            labels = ["x", "y"]
+        elif len(labels) < 2 or len(labels) != num_curves + 2:
             if num_curves > 1:
-                lines = "line1, ..., line%d"%num_curves
+                lines = "line1, ..., line%d" % num_curves
             else:
                 lines = "line"
-            raise TypeError("labels should be [x, y, %s]"%lines)
+            raise TypeError("labels should be [x, y, %s]" % lines)
 
         if len(labels) == 2:
             if num_curves > 1:
-                line_labels = ['y%d'%k for k in range(num_curves)]
+                line_labels = ["y%d" % k for k in range(num_curves)]
             else:
                 line_labels = [labels[1]]
             labels = list(labels) + line_labels
         self.labels = labels
 
-        # TODO: self.fn is a duplicate of self._function below. Deprecated?
-        self.fn = fn
-        self.name = name # if name else fn.__name__ + " "
         self.plot_x = plot_x
+        # TODO: drop plot= option; likely nobody is using it, and this is a 1.0 release
+        if plot is not None:
+            warnings.warn("***DEPRECATED*** use Curve(..., plotter=...) instead of plot=...")
+        self.plotter = plotter
 
-        pars, state = _parse_pars(fn, init=kwargs, skip=1, name=name)
+        # _assign_pars(state, self)  # ... and state variables as well
+        self._cached_theory = None
+        self._webview_plots = {}
 
-        # Make parameters accessible as model attributes
-        _assign_pars(self, pars)
-        #_assign_pars(state, self)  # ... and state variables as well
+        self.fn = fn
+        self.name = name  # if name else fn.__name__ + " "
+        if pars is None:
+            pars, state = _parse_pars(self.fn, init=kwargs, skip=1, name=name)
+        # else: print("restoring", {k: float(v) for k, v in pars.items()}, state)
+        # print("parsed", self.fn, pars, state)
 
         # Remember the function, parameters, and number of parameters
         # Note: we are remembering the parameter names and not the
@@ -229,17 +273,38 @@ class Curve(object):
         # need to override __setattr__ to intercept assignment to the
         # parameter attributes and redirect them to the a _pars dictionary.
         # ... and similarly for state if we decide to make them attributes.
-        self._function = fn
-        self._pnames = list(sorted(pars.keys()))
-        self._state = state
-        self._plot = plot
-        self._cached_theory = None
+        self.state = state
+
+        # Need to do collision test before making parameters available as attributes
+        # otherwise every parameter is a collision. Need to assign the pars object
+        # last so that we know all the variables that could collide.
+        collisions = [key for key in pars.keys() if hasattr(self, key)]
+        if collisions:
+            raise ValueError(f"parameter names shadowed by Curve object: {', '.join(collisions)}")
+        self.pars = pars
+
+    # Allow dot access to members of the parameter dictionary. Existing attributes
+    # of the object take precedence.
+    def __setattr__(self, key, value):
+        # print(f"setting {key}")
+        if self.pars and key in self.pars and key not in self.__dict__:
+            if not isinstance(value, ValueProtocol):
+                raise TypeError("Can only assign parameter or expression to a parameter slot")
+            self.__dict__["pars"][key] = value
+        else:
+            super().__setattr__(key, value)
+
+    def __getattr__(self, key):
+        # print(f"getting {key}")
+        if self.pars and key in self.pars:
+            return self.pars[key]
+        raise AttributeError(f"{type(self)!r} has no attribute {key!r}")
 
     def update(self):
         self._cached_theory = None
 
     def parameters(self):
-        return dict((p, getattr(self, p)) for p in self._pnames)
+        return self.pars
 
     def numpoints(self):
         return np.prod(self.y.shape)
@@ -254,30 +319,30 @@ class Curve(object):
 
     def _compute_theory(self, x):
         kw = self._fetch_pars()
-        return self._function(x, **kw)
+        return self.fn(x, **kw)
 
     def _fetch_pars(self):
-        kw = dict((p, getattr(self, p).value) for p in self._pnames)
-        kw.update(self._state)
+        kw = {k: float(v) for k, v in self.pars.items()}
+        kw.update(**self.state)
         return kw
 
     def simulate_data(self, noise=None):
         theory = self.theory()
         if noise is not None:
-            if noise == 'data':
+            if noise == "data":
                 pass
             elif noise < 0:
-                self.dy = -0.01*noise*theory
+                self.dy = np.full_like(theory, -noise)
             else:
-                self.dy = noise
-        self.y = theory + np.random.randn(*theory.shape)*self.dy
+                self.dy = 0.01 * noise * abs(theory)
+        self.y = theory + np.random.randn(*theory.shape) * self.dy
 
     def residuals(self):
         return (self.theory() - self.y) / self.dy
 
     def nllf(self):
         r = self.residuals()
-        return 0.5 * np.sum(r ** 2)
+        return 0.5 * np.sum(r**2)
 
     def save(self, basename):
         # TODO: need header line with state vars as json
@@ -293,24 +358,24 @@ class Curve(object):
             headers = ["x"]
             for k, (y, dy, fx) in enumerate(zip(self.y, self.dy, theory)):
                 columns.extend((y, dy, fx))
-                headers.extend(("y[%d]"%(k+1), "dy[%d]"%(k+1), "fx[%d]"%(k+1)))
+                headers.extend(("y[%d]" % (k + 1), "dy[%d]" % (k + 1), "fx[%d]" % (k + 1)))
         else:
             # Single-valued y, dy for single valued x.
             headers = ["x", "y", "dy", "fy"]
             columns = [self.x, self.y, self.dy, theory]
         data = np.vstack(columns)
-        outfile = basename + '.dat'
+        outfile = basename + ".dat"
         with open(outfile, "w") as fd:
             fd.write("# " + "\t ".join(headers) + "\n")
             np.savetxt(fd, data.T)
 
     def plot(self, view=None):
-        if self._plot is not None:
+        if self.plotter is not None:
             kw = self._fetch_pars()
-            self._plot(self.x, self.y, self.dy, self.theory(), view=view, **kw)
+            self.plotter(self.x, self.y, self.dy, self.theory(), view=view, **kw)
             return
 
-        import pylab
+        import matplotlib.pyplot as plt
         from .plotutil import coordinated_colors
 
         x = self.x
@@ -323,84 +388,103 @@ class Curve(object):
         if self._num_curves > 1:
             y, dy, theory_y, resid = self.y.T, self.dy.T, theory_y.T, resid.T
         else:
-            y, dy, theory_y, resid = (v[:, None]
-                                      for v in (self.y, self.dy, theory_y, resid))
+            y, dy, theory_y, resid = (v[:, None] for v in (self.y, self.dy, theory_y, resid))
 
         colors = tuple(coordinated_colors() for _ in range(self._num_curves))
+        # clear figure after calling coordinated_colors, which can create an axis object
+        plt.clf()
         labels = self.labels
 
-        #print "kw_plot",kw
-        if view == 'residual':
+        # print "kw_plot",kw
+        if view == "residual":
             _plot_resids(x, resid, colors, labels=labels, view=view)
         else:
             plot_ratio = 4
-            h = pylab.subplot2grid((plot_ratio, 1), (0, 0), rowspan=plot_ratio-1)
+            h = plt.subplot2grid((plot_ratio, 1), (0, 0), rowspan=plot_ratio - 1)
             for tick_label in h.get_xticklabels():
                 tick_label.set_visible(False)
-            _plot_fits(data=(x, y, dy), theory=(theory_x, theory_y),
-                       colors=colors, labels=labels, view=view)
-            #pylab.gca().xaxis.set_visible(False)
-            #pylab.gca().spines['bottom'].set_visible(False)
-            #pylab.gca().set_xticks([])
+            _plot_fits(data=(x, y, dy), theory=(theory_x, theory_y), colors=colors, labels=labels, view=view)
+            # plt.gca().xaxis.set_visible(False)
+            # plt.gca().spines['bottom'].set_visible(False)
+            # plt.gca().set_xticks([])
 
-            pylab.subplot2grid((plot_ratio, 1), (plot_ratio-1, 0), sharex=h)
+            plt.subplot2grid((plot_ratio, 1), (plot_ratio - 1, 0), sharex=h)
             _plot_resids(x, resid, colors=colors, labels=labels, view=view)
 
+    def register_webview_plot(
+        self, plot_title: str, plot_function: Callable, change_with: Literal["parameter", "uncertainty"]
+    ):
+        # Plot function syntax: f(model, problem, state)
+        # change_with = 'parameter' or 'uncertainty'
+
+        self._webview_plots[plot_title] = dict(func=plot_function, change_with=change_with)
+
+    @property
+    def webview_plots(self):
+        return self._webview_plots
+
+
 def _plot_resids(x, resid, colors, labels, view):
-    import pylab
-    pylab.axhline(y=1, ls='dotted', color='k')
-    pylab.axhline(y=0, ls='solid', color='k')
-    pylab.axhline(y=-1, ls='dotted', color='k')
+    import matplotlib.pyplot as plt
+
+    plt.axhline(y=1, ls="dotted", color="k")
+    plt.axhline(y=0, ls="solid", color="k")
+    plt.axhline(y=-1, ls="dotted", color="k")
     for k, color in enumerate(colors):
-        pylab.plot(x, resid[:, k], '.', color=color['base'])
-    pylab.gca().locator_params(axis='y', tight=True, nbins=4)
-    pylab.xlabel(labels[0])
-    pylab.ylabel("(f(x)-y)/dy")
-    if view == 'logx':
-        pylab.xscale('log')
-    elif view == 'loglog':
-        pylab.xscale('log')
+        plt.plot(x, resid[:, k], ".", color=color["base"])
+    plt.gca().locator_params(axis="y", tight=True, nbins=4)
+    plt.xlabel(labels[0])
+    plt.ylabel("(f(x)-y)/dy")
+    if view == "logx":
+        plt.xscale("log")
+    elif view == "loglog":
+        plt.xscale("log")
+
 
 def _plot_fits(data, theory, colors, labels, view):
-    import pylab
+    import matplotlib.pyplot as plt
+
     x, y, dy = data
     theory_x, theory_y = theory
+    # Protect against unsorted data when plotting theory lines
+    index = np.argsort(theory_x)
     for k, color in enumerate(colors):
-        pylab.errorbar(x, y[:, k], yerr=dy[:, k], fmt='.',
-                       color=color['base'], label='_')
-        pylab.plot(theory_x, theory_y[:, k], '-',
-                   color=color['dark'], label=labels[k+2])
+        plt.errorbar(x, y[:, k], yerr=dy[:, k], fmt=".", color=color["base"], label="_")
+        plt.plot(theory_x[index], theory_y[index, k], "-", color=color["dark"], label=labels[k + 2])
     # Note: no xlabel since it is supplied by the residual plot below this plot
-    pylab.ylabel(labels[1])
+    plt.ylabel(labels[1])
     if len(colors) > 1:
-        pylab.legend()
-    if view == 'log':
-        pylab.xscale('linear')
-        pylab.yscale('log')
-    elif view == 'logx':
-        pylab.xscale('log')
-        pylab.yscale('linear')
-    elif view == 'logy':
-        pylab.xscale('linear')
-        pylab.yscale('log')
-    elif view == 'loglog':
-        pylab.xscale('log')
-        pylab.yscale('log')
-    else: # view == 'linear'
-        pylab.xscale('linear')
-        pylab.yscale('linear')
+        plt.legend()
+    if view == "log":
+        plt.xscale("linear")
+        plt.yscale("log")
+    elif view == "logx":
+        plt.xscale("log")
+        plt.yscale("linear")
+    elif view == "logy":
+        plt.xscale("linear")
+        plt.yscale("log")
+    elif view == "loglog":
+        plt.xscale("log")
+        plt.yscale("log")
+    else:  # view == 'linear'
+        plt.xscale("linear")
+        plt.yscale("linear")
+
 
 def plot_resid(x, resid):
     """
     **DEPRECATED**
     """
-    import pylab
-    pylab.axhline(y=1, ls='dotted', color='k')
-    pylab.axhline(y=0, ls='solid', color='k')
-    pylab.axhline(y=-1, ls='dotted', color='k')
-    pylab.plot(x, resid, '.')
-    pylab.gca().locator_params(axis='y', tight=True, nbins=4)
-    pylab.ylabel("Residuals")
+    import matplotlib.pyplot as plt
+
+    plt.axhline(y=1, ls="dotted", color="k")
+    plt.axhline(y=0, ls="solid", color="k")
+    plt.axhline(y=-1, ls="dotted", color="k")
+    plt.plot(x, resid, ".")
+    plt.gca().locator_params(axis="y", tight=True, nbins=4)
+    plt.ylabel("Residuals")
+
 
 def plot_err(x, y, dy, fy, view=None, **kw):
     """
@@ -410,55 +494,61 @@ def plot_err(x, y, dy, fy, view=None, **kw):
 
     *view* is one of linear, log, logx or loglog.
     """
-    import pylab
-    pylab.errorbar(x, y, yerr=dy, fmt='.')
-    pylab.plot(x, fy, '-')
-    if view == 'log':
-        pylab.xscale('linear')
-        pylab.yscale('log')
-    elif view == 'logx':
-        pylab.xscale('log')
-        pylab.yscale('linear')
-    elif view == 'loglog':
-        pylab.xscale('log')
-        pylab.yscale('log')
-    else: # view == 'linear'
-        pylab.xscale('linear')
-        pylab.yscale('linear')
+    import matplotlib.pyplot as plt
+
+    plt.errorbar(x, y, yerr=dy, fmt=".")
+    plt.plot(x, fy, "-")
+    if view == "log":
+        plt.xscale("linear")
+        plt.yscale("log")
+    elif view == "logx":
+        plt.xscale("log")
+        plt.yscale("linear")
+    elif view == "loglog":
+        plt.xscale("log")
+        plt.yscale("log")
+    else:  # view == 'linear'
+        plt.xscale("linear")
+        plt.yscale("linear")
 
 
-_LOGFACTORIAL = np.array([log(np.prod(np.arange(1., k + 1)))
-                          for k in range(21)])
+_LOGFACTORIAL = np.array([log(np.prod(np.arange(1.0, k + 1))) for k in range(21)])
 
 
 def logfactorial(n):
     """Compute the log factorial for each element of an array"""
-    result = np.empty(n.shape, dtype='double')
-    idx = (n <= 20)
-    result[idx] = _LOGFACTORIAL[np.asarray(n[idx], 'int32')]
+    result = np.empty(n.shape, dtype="double")
+    idx = n <= 20
+    result[idx] = _LOGFACTORIAL[np.asarray(n[idx], "int32")]
     n = n[~idx]
-    result[~idx] = n * \
-        log(n) - n + log(n * (1 + 4 * n * (1 + 2 * n))) / 6 + log(pi) / 2
+    result[~idx] = n * log(n) - n + log(n * (1 + 4 * n * (1 + 2 * n))) / 6 + log(pi) / 2
     return result
 
 
+@dataclass(init=False, eq=False)
 class PoissonCurve(Curve):
     r"""
     Model a measurement with Poisson uncertainty.
 
     The nllf is calculated using Poisson probabilities, but the curve itself
     is displayed using the approximation that $\sigma_y \approx \sqrt(y)$.
+    A zero predicted rate is valid when the corresponding observed count is zero.
+
+    Note that the *dy* argument is ignored. It is only present for deserialization
+    of the Curve base class.
 
     See :class:`Curve` for details.
     """
-    def __init__(self, fn, x, y, name="", **fnkw):
+
+    def __init__(self, fn, x, y, dy=None, name="", **fnkw):
+        # dy ignored. It is needed for dataclass deserialization
         dy = sqrt(y) + (y == 0) if y is not None else None
         Curve.__init__(self, fn, x, y, dy, name=name, **fnkw)
         self._logfacty = logfactorial(y) if y is not None else None
         self._logfactysum = np.sum(self._logfacty)
 
     ## Assume gaussian residuals for now
-    #def residuals(self):
+    # def residuals(self):
     #    # TODO: provide individual probabilities as residuals
     #    # or perhaps the square roots --- whatever gives a better feel for
     #    # which points are driving the fit
@@ -468,8 +558,13 @@ class PoissonCurve(Curve):
     def nllf(self):
         theory = self.theory()
         if (theory <= 0).any():
-            return 1e308
-        return -sum(self.y * log(theory) - theory) + self._logfactysum
+            if ((theory < 0) | ((theory == 0) & (self.y > 0))).any():
+                return 1e308
+            # support y log(theory) = 0 when y = theory = 0
+            log_theory = log(np.where(theory == 0, 1.0, theory))
+        else:
+            log_theory = log(theory)
+        return -np.sum(self.y * log_theory - theory) + self._logfactysum
 
     def simulate_data(self, noise=None):
         theory = self.theory()
@@ -477,3 +572,32 @@ class PoissonCurve(Curve):
         self.dy = sqrt(self.y) + (self.y == 0)
         self._logfacty = logfactorial(self.y)
         self._logfactysum = np.sum(self._logfacty)
+
+
+def test_poisson_curve_zero_rates():
+    for rates, counts, expected in [
+        ([0.0], [0], 0.0),
+        ([0.0, 0.0], [0, 0], 0.0),
+        ([0.0, 1.0, 2.0], [0, 1, 2], 3 - log(2)),
+        ([2.0, 0.0], [0, 0], 2.0),
+        ([0.0], [1], 1e308),
+        ([-1.0], [0], 1e308),
+        ([-1.0, 2.0], [0, 2], 1e308),
+    ]:
+        rates, counts = np.asarray(rates), np.asarray(counts)
+        model = PoissonCurve(lambda x: x, rates, counts)
+        with np.errstate(divide="raise", invalid="raise"):
+            np.testing.assert_allclose(model.nllf(), expected)
+
+
+def test_poisson_curve_multiple_curves():
+    for num_curves in [1, 2, 3]:
+        rates = np.full((num_curves, 4), 2.0)
+        counts = np.full((num_curves, 4), 2)
+        model = PoissonCurve(lambda x: rates, np.arange(4), counts)
+        value = model.nllf()
+        assert np.ndim(value) == 0
+        np.testing.assert_allclose(value, num_curves * 4 * (2 - log(2)))
+
+        flattened = PoissonCurve(lambda x: x, rates.ravel(), counts.ravel())
+        np.testing.assert_allclose(value, flattened.nllf())

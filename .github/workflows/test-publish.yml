@@ -1,0 +1,159 @@
+name: Test and Publish to PyPI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Build a pure Python wheel and upload as an artifact
+  build-wheel:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.set-matrix.outputs.versions }}
+      default_version: ${{ steps.set-matrix.outputs.default_version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Checkout Random123
+        uses: actions/checkout@v7
+        with:
+          repository: "DEShawResearch/random123"
+          ref: v1.14.0
+          path: bumps/dream/random123
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Get Filtered Minor Versions
+        id: set-matrix
+        run: |
+          MIN_VERSION=$(grep "requires-python" pyproject.toml | grep -oE '[0-9]+\.[0-9]+' | head -1)
+
+          # Get all versions as numeric arrays, sorted
+          RAW_JSON=$(uv python list --all-versions --output-format json | jq -c --arg min "$MIN_VERSION" '
+            ($min | split(".") | map(tonumber)) as $min_parts |
+            [ .[] | 
+              # Only select versions that do not have a dash or letter suffixes for pre-releases
+              select(.version | test("^\\d+\\.\\d+\\.\\d+$")) | 
+              .version | split(".") | map(tonumber) | .[0:2]
+            ]
+            | unique
+            | map(select(. >= $min_parts))
+            | sort
+          ')
+
+          # 1. Full Matrix (everything)
+          VERSIONS=$(echo "$RAW_JSON" | jq -c 'map(join("."))')
+
+          # 2. Extract (n-1) version for "stable" default
+          # If only one version exists, it defaults to that one
+          DEFAULT_VERSION=$(echo "$RAW_JSON" | jq -r 'if length > 1 then .[-2] else .[-1] end | join(".")')
+
+          echo "versions=$VERSIONS" >> $GITHUB_OUTPUT
+          echo "default_version=$DEFAULT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: build webview
+        run: |
+          cd bumps/webview/client
+          bun install
+          bun run build
+      - name: Create the wheel
+        run: uv build --python ${{ steps.set-matrix.outputs.default_version }}
+
+      - name: Upload the wheel and source distribution artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts
+          path: |
+            dist/bumps-*-py3-none-any.whl
+            dist/bumps-*.tar.gz
+  # Test the wheel on different platforms, test webview, and check docs build
+  test:
+    runs-on: ${{ matrix.os }}
+    needs: build-wheel
+    env:
+      # Use the n-1 version as the "stable" baseline
+      STABLE_PYTHON: ${{ needs.build-wheel.outputs.default_version }}
+    strategy:
+      matrix:
+        os: ["ubuntu-latest"]
+        py: ${{ fromJson(needs.build-wheel.outputs.versions) }}
+        include:
+          - os: windows-latest
+            py: ${{ needs.build-wheel.outputs.default_version }}
+          - os: macos-latest
+            py: ${{ needs.build-wheel.outputs.default_version }}
+          - os: ubuntu-latest
+            py: docs
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Download the wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts
+          path: dist
+
+      - name: Install the wheel
+        id: install-step
+        # This allows the job to proceed even if wheels are missing for dependencies
+        continue-on-error: true
+        run: |
+          PY_VER="${{ (matrix.py == 'docs' && env.STABLE_PYTHON) || matrix.py }}"
+          uv venv --python=$PY_VER
+          for whl in dist/bumps-*-py3-none-any.whl; do
+            uv pip install --no-build "$whl[dev]"
+          done
+
+      # Emit a warning annotation if the install failed, but don't fail the job
+      - name: Notify Missing Wheels
+        if: steps.install-step.outcome == 'failure'
+        run: |
+          echo "::warning title=Incomplete Test Run::Python ${{ matrix.py }} could not be fully tested because some dependencies lack wheels."
+
+      - name: Run tests
+        # Only run tests if the install actually succeeded
+        if: steps.install-step.outcome == 'success' && matrix.extra != 'docs'
+        run: uv run python -m pytest -v
+
+      - name: Check that the docs build (linux only)
+        # Use the stable n-1 version for doc builds
+        if: matrix.extra == 'docs'
+        run: |
+          source .venv/bin/activate
+          make -j 4 -C doc SPHINXOPTS="-W --keep-going -n" html
+
+  # Upload wheel to PyPI only when a tag is pushed, and its name begins with 'v'
+  upload-to-pypi:
+    runs-on: ubuntu-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
+    steps:
+      - name: Retrieve all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts
+          path: dist
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

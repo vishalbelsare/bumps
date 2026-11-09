@@ -1,24 +1,101 @@
 """
 Miscellaneous utility functions.
 """
-from __future__ import division
 
-__all__ = ["kbhit", "profile", "pushdir", "push_seed", "redirect_console"]
+__all__ = ["kbhit", "profile", "pushdir", "push_seed", "redirect_console", "format_uncertainty"]
 
-import sys
 import os
+import sys
 import types
+from dataclasses import Field, dataclass, field, fields, is_dataclass
+from io import StringIO
+from contextlib import contextmanager
 
-try:  # CRUFT: python 2.x
-    from cStringIO import StringIO
-except ImportError:
-    from io import StringIO
+# this can be substituted with pydantic dataclass for schema-building...
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    runtime_checkable,
+)
 
 import numpy as np
-from numpy import ascontiguousarray as _dense
+
 # **DEPRECATED** we can import erf directly from scipy.special.erf
 # so there is no longer a need for bumps.util.erf.
 from scipy.special import erf
+
+USE_PYDANTIC = os.environ.get("BUMPS_USE_PYDANTIC", "False") == "True"
+from numpy.typing import NDArray  # noqa
+
+# Use the DREAM version of format_uncertainty for other places in bumps
+from .dream.stats import format_uncertainty  # noqa
+
+
+def field_desc(description: str) -> Any:
+    return field(metadata={"description": description})
+
+
+T = TypeVar("T")
+SCHEMA_ATTRIBUTE_NAME = "__bumps_schema__"
+
+
+def schema_config(
+    include: Optional[List[str]] = None,
+    exclude: Optional[List[str]] = None,
+) -> Callable[[Type[T]], Type[T]]:
+    """
+    Add an attribute for configuring serialization
+    (presence of SCHEMA_ATTRIBUTE_NAME attribute is used during
+    serialization of unique instances e.g. Parameter)
+    """
+
+    def add_schema_config(cls: Type[T]) -> Type[T]:
+        if include is not None and exclude is not None:
+            fqn = f"{cls.__module__}.{cls.__qualname__}"
+            raise ValueError(f"{fqn} schema: include array and exclude array are mutually exclusive - only define one")
+
+        setattr(cls, SCHEMA_ATTRIBUTE_NAME, dict(include=include, exclude=exclude))
+        return cls
+
+    return add_schema_config
+
+
+def has_schema_config(cls):
+    return is_dataclass(cls) and hasattr(cls, SCHEMA_ATTRIBUTE_NAME)
+
+
+@dataclass(init=True)
+class NumpyArray:
+    """
+    Wrapper for numpy arrays:
+    on serialize,
+     - array.tolist() is called and stored in 'values' attribute
+     - str(array.dtype) is stored in 'dtype' attribute
+
+     on deserialize,
+      - return new NDArray(values, dtype=dtype)
+    """
+
+    dtype: str
+    values: Sequence = field(default_factory=list)
+
+
+if USE_PYDANTIC:
+    from typing import TypeAlias
+
+    NDArray: TypeAlias = NumpyArray
 
 
 def parse_errfile(errfile):
@@ -38,8 +115,9 @@ def parse_errfile(errfile):
         import glob
         errfile = glob.glob(os.path.join(path, '*.err'))[0]
     """
-    from .dream.stats import parse_var
-    pars = []
+    from .dream.stats import parse_var, VarStats
+
+    pars: List[VarStats] = []
     chisq = []
     overall = None
     with open(errfile) as fid:
@@ -58,7 +136,7 @@ def parse_errfile(errfile):
 
     if overall is None:
         overall = chisq[0]
-    pardict = dict((p.name, p) for p in pars)
+    pardict = dict((p.label, p) for p in pars)
     return overall, chisq, pardict
 
 
@@ -70,13 +148,15 @@ def profile(fn, *args, **kw):
     import pstats
 
     result = [None]
+
     def call():
         result[0] = fn(*args, **kw)
-    datafile = 'profile.out'
-    cProfile.runctx('call()', dict(call=call), {}, datafile)
+
+    datafile = "profile.out"
+    cProfile.runctx("call()", dict(call=call), {}, datafile)
     stats = pstats.Stats(datafile)
     # order='calls'
-    order = 'cumulative'
+    order = "cumulative"
     # order='pcalls'
     # order='time'
     stats.sort_stats(order)
@@ -91,36 +171,13 @@ def kbhit():
     """
     try:  # Windows
         import msvcrt
+
         return msvcrt.kbhit()
     except ImportError:  # Unix
         import select
+
         i, _, _ = select.select([sys.stdin], [], [], 0.0001)
         return sys.stdin in i
-
-
-class DynamicModule(types.ModuleType):
-    def __init__(self, path, name):
-       self.__path__ = [path]
-       self.__name__ = name
-
-
-def relative_import(filename, module_name="relative_import"):
-    """
-    Define an empty module allowing relative imports from a script.
-
-    By setting :code:`__package__ = relative_import(__file__)` at the top of
-    your script file you can even run your model as a python script.  So long
-    as the script behaviour is isolated in :code:`if __name__ == "__main__":`
-    code block and :code:`problem = FitProblem(...)` is defined, the same model
-    can be used both within and outside of bumps.
-    """
-    path = os.path.dirname(os.path.abspath(filename))
-    if (module_name in sys.modules
-            and not isinstance(sys.modules[module_name], DynamicModule)):
-        raise ImportError("relative import would override the existing module %s. Use another name"
-                          % module_name)
-    sys.modules[module_name] = DynamicModule(path, module_name)
-    return module_name
 
 
 class redirect_console(object):
@@ -163,6 +220,7 @@ class redirect_console(object):
         captured to string
 
     """
+
     def __init__(self, stdout=None, stderr=None):
         self.open_files = []
         self.sys_stdout = []
@@ -171,18 +229,18 @@ class redirect_console(object):
         if stdout is None:
             self.open_files.append(StringIO())
             self.stdout = self.open_files[-1]
-        elif hasattr(stdout, 'write'):
+        elif hasattr(stdout, "write"):
             self.stdout = stdout
         else:
-            self.open_files.append(open(stdout, 'w'))
+            self.open_files.append(open(stdout, "w"))
             self.stdout = self.open_files[-1]
 
         if stderr is None:
             self.stderr = self.stdout
-        elif hasattr(stderr, 'write'):
+        elif hasattr(stderr, "write"):
             self.stderr = stderr
         else:
-            self.open_files.append(open(stderr, 'w'))
+            self.open_files.append(open(stderr, "w"))
             self.stderr = self.open_files[-1]
 
     def __del__(self):
@@ -203,6 +261,7 @@ class redirect_console(object):
         del self.sys_stderr[-1]
         return False
 
+
 class push_python_path(object):
     """
     Change sys.path for the duration of a with statement.
@@ -218,6 +277,7 @@ class push_python_path(object):
         >>> restored_path = list(sys.path)
         >>> assert original_path == restored_path
     """
+
     def __init__(self, path):
         self.path = path
 
@@ -245,6 +305,7 @@ class pushdir(object):
         >>> restored_wd = os.getcwd()
         >>> assert original_wd == restored_wd
     """
+
     def __init__(self, path):
         self.path = os.path.abspath(path)
 
@@ -314,6 +375,7 @@ class push_seed(object):
         Exception raised
         899
     """
+
     def __init__(self, seed=None):
         self._state = np.random.get_state()
         np.random.seed(seed)
@@ -323,3 +385,122 @@ class push_seed(object):
 
     def __exit__(self, *args):
         np.random.set_state(self._state)
+
+
+@contextmanager
+def push_mpl_backend(backend="agg"):
+    """Temporarily switch to a different matplotlib backend."""
+    import matplotlib
+
+    original_backend = matplotlib.get_backend()
+    try:
+        matplotlib.use(backend)
+        yield
+    finally:
+        matplotlib.use(original_backend)
+
+
+def get_libraries(obj, libraries=None):
+    if libraries is None:
+        libraries = {}
+
+    if is_dataclass(obj):
+        _add_to_libraries(obj, libraries)
+        for f in fields(obj):
+            subobj = getattr(obj, f.name, None)
+            if subobj is not None:
+                get_libraries(subobj, libraries)
+    elif isinstance(obj, (list, tuple, types.GeneratorType)):
+        for v in obj:
+            get_libraries(v, libraries)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            if is_dataclass(v):
+                get_libraries(v, libraries)
+
+    return libraries
+
+
+def _add_to_libraries(obj, libraries: dict):
+    top_level_package = obj.__module__.split(".")[0]
+    if top_level_package is not None and top_level_package not in libraries:
+        # module is already in sys.modules for obj
+        # get __version__ attribute from module directly
+        version = getattr(sys.modules[top_level_package], "__version__", None)
+        schema_version = getattr(sys.modules[top_level_package], "__schema_version__", None)
+        libraries[top_level_package] = dict(version=version, schema_version=schema_version)
+
+
+def format_duration(seconds):
+    """
+    Convert seconds into a human-readable duration string.
+
+    Args:
+        seconds (float): Duration in seconds
+
+    Returns:
+        str: Formatted duration string
+    """
+    # Handle negative values
+    if seconds < 0:
+        return "-" + format_duration(-seconds)
+    elif seconds == 0:
+        return "0 seconds"
+
+    # Define time units and their conversion factors
+    units = [
+        ("year", 365.25 * 24 * 60 * 60),
+        ("week", 7 * 24 * 60 * 60),
+        ("day", 24 * 60 * 60),
+        ("hour", 60 * 60),
+        ("minute", 60),
+        ("second", 1),
+        ("millisecond", 1e-3),
+        ("microsecond", 1e-6),
+        ("nanosecond", 1e-9),
+    ]
+
+    # Find the most appropriate unit
+    for unit_name, factor in units:
+        value = abs(seconds / factor)
+        integer = int(round(value))
+        if value > 0.95:
+            if abs(value - integer) < 0.05:
+                return f"{integer} {unit_name}{'s' if integer != 1 else ''}"
+            else:
+                return f"{value:.1f} {unit_name}s"
+
+    return f"0.0 {units[-1][0]}"
+
+
+def format_duration_demo():
+    # Test cases
+    test_values = [
+        3661.5,  # Mixed hours/minutes/seconds
+        86400.25,  # Days with fractional seconds
+        24 * 60 * 60 * 1.06,  # a little over a day
+        604800.125,  # Weeks with milliseconds
+        31536061.5,  # Years with extra days
+        0.001,  # Milliseconds
+        0,  # Zero
+        -12345,  # Negative value
+    ]
+
+    for seconds in test_values:
+        print(f"{seconds:>12.3f}s → {format_duration(seconds)}")
+
+
+def examples_path():
+    """
+    Path to the examples directory.
+    """
+    import bumps
+    from importlib.resources import files
+
+    path = files(bumps) / "examples"
+    return path
+
+
+if __name__ == "__main__":
+    format_duration_demo()
+    # test_format_uncertainty()

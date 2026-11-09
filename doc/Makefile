@@ -40,8 +40,8 @@ help:
 clean:
 	# Cleaning matplotlib plots from build
 	# Cleaning html/pdf from $(BUILDDIR)
-	# Resetting api/ and tutorial/
-	-rm -rf $(BUILDDIR) api tutorial
+	# Resetting tutorial and autodoc directories
+	-rm -rf $(BUILDDIR) tutorial api dream
 
 html:
 	$(SPHINXBUILD) -b html $(ALLSPHINXOPTS) $(BUILDDIR)/html
@@ -136,4 +136,3 @@ doctest:
 	$(SPHINXBUILD) -b doctest $(ALLSPHINXOPTS) $(BUILDDIR)/doctest
 	@echo "Testing of doctests in the sources finished, look at the " \
 	      "results in $(BUILDDIR)/doctest/output.txt."
-

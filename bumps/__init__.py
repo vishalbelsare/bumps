@@ -12,7 +12,13 @@ A graphical interface allows direct manipulation of the model parameters.
 See https://bumps.readthedocs.io for online manuals.
 """
 
-__version__ = "0.9.0"
+try:
+    from ._version import __version__  # noqa: F401
+except ImportError:
+    __version__ = "unknown"
+
+__schema_version__ = "1"
+
 
 def data_files():
     """
@@ -26,6 +32,7 @@ def data_files():
               ...)
     """
     from .gui.utilities import data_files
+
     return data_files()
 
 
@@ -41,4 +48,5 @@ def package_data():
               ...)
     """
     from .gui.utilities import package_data
+
     return package_data()

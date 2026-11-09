@@ -4,10 +4,21 @@ Progress monitors.
 
 Process monitors accept a :class:`bumps.history.History` object each cycle
 and perform some sort of work.
-"""
-from __future__ import print_function
 
-__all__ = ['Monitor', 'Logger', 'TimedUpdate']
+Monitors have a :meth:`Monitor.config_history` method which calls
+*history.requires()* to set the amount of history it needs and a
+*Monitor.__call__* method which takes the updated history and
+generates the monitor output.
+
+Most monitors are subclassed from :class:`TimedUpdate` to set a minimum
+time between updates and to only show updates when there is an improvement.
+The *TimedUpdate* subclasses must override :meth:`TimedUpdate.show_progress`
+and :meth:`TimedUpdate.show_improvement` to control the output form. History
+must be updated with time, value, point and step. The
+bumps.fitters.MonitorRunner class manages history and updates.
+"""
+
+__all__ = ["Monitor", "Logger", "TimedUpdate"]
 
 from numpy import inf
 
@@ -16,6 +27,7 @@ class Monitor(object):
     """
     Base class for monitors.
     """
+
     def config_history(self, history):
         """
         Indicate which fields are needed by the monitor and for what duration.
@@ -53,6 +65,7 @@ class Logger(Monitor):
     Call :meth:`config_history` with the :class:`bumps.history.History`
     object before starting so that the correct fields are stored.
     """
+
     def __init__(self, fields=(), table=None):
         self.fields = fields
         self.table = table
@@ -87,11 +100,12 @@ class TimedUpdate(Monitor):
     *improvement* is the number of seconds to go before showing
     improvements to value.
 
-    By default, the updater only prints step number and improved value.
+    By default, the update only prints step number and improved value.
     Subclass TimedUpdate with replaced :meth:`show_progress` and
     :meth:`show_improvement` to trigger GUI updates or show parameter
     values.
     """
+
     def __init__(self, progress=60, improvement=5):
         self.progress_delta = progress
         self.improvement_delta = improvement

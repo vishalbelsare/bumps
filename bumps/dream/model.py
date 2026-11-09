@@ -96,34 +96,35 @@ Option 5 is like option 2 but the reported likelihoods do not take the
 on the 1-sigma uncertainty, so use the style given in option 2 for this case.
 
 """
-from __future__ import division
 
-__all__ = ['MCMCModel', 'Density', 'LogDensity', 'Simulation',
-           'MVNormal', 'Mixture']
+__all__ = ["MCMCModel", "Density", "LogDensity", "Simulation", "MVNormal", "Mixture"]
+
+from abc import abstractmethod
+from typing import List
 
 import numpy as np
 from numpy import diag, log, exp, pi
 from numpy.linalg import cholesky, inv
+from numpy.typing import NDArray
 
 from . import exppow
 
 
-class MCMCModel(object):
+class MCMCModel:
     """
-    MCMCM model abstract base class.
+    MCMC model abstract base class.
 
     Each model must have a negative log likelihood function which operates
     on a point x, returning the negative log likelihood, or inf if the point
     is outside the domain.
     """
-    labels = None
-    bounds = None
 
+    labels: List[str] = None
+    bounds: NDArray = None
+
+    @abstractmethod
     def nllf(self, x):
-        raise NotImplemented
-
-    def log_density(self, x):
-        return -self.nllf(x)
+        raise NotImplementedError
 
     def plot(self, x):
         pass
@@ -134,10 +135,11 @@ class MCMCModel(object):
 
 class Density(MCMCModel):
     """
-    Construct an MCMC model from a probablility density function.
+    Construct an MCMC model from a probability density function.
 
     *f* is the density function
     """
+
     def __init__(self, f, bounds=None, labels=None):
         self.f, self.bounds, self.labels = f, bounds, labels
 
@@ -147,10 +149,11 @@ class Density(MCMCModel):
 
 class LogDensity(MCMCModel):
     """
-    Construct an MCMC model from a log probablility density function.
+    Construct an MCMC model from a log probability density function.
 
     *f* is the log density function
     """
+
     def __init__(self, f, bounds=None, labels=None):
         self.f, self.bounds, self.labels = f, bounds, labels
 
@@ -181,42 +184,44 @@ class Simulation(MCMCModel):
         G = 1: double exponential
         G -> -1: uniform
     """
-    def __init__(self, f=None, bounds=None, data=None, sigma=1, gamma=0,
-                 labels=None):
+
+    def __init__(self, f=None, bounds=None, data=None, sigma=1, gamma=0, labels=None):
         self.f, self.bounds, self.labels = f, bounds, labels
         self.data, self.sigma, self.gamma = data, sigma, gamma
         cb, wb = exppow.exppow_pars(gamma)
-        self._offset = np.sum(log(wb/sigma * np.ones_like(data)))
+        self._offset = np.sum(log(wb / sigma * np.ones_like(data)))
         self._cb = cb
-        self._pow = 2/(1+gamma)
-        #print "cb", cb, "sqrt(2pi)*wb", sqrt(2*pi)*wb
-        #print "offset", self._offset
+        self._pow = 2 / (1 + gamma)
+        # print "cb", cb, "sqrt(2pi)*wb", sqrt(2*pi)*wb
+        # print "offset", self._offset
 
     def nllf(self, x):
         err = self.f(x) - self.data
-        log_p = self._offset - np.sum(self._cb * abs(err/self.sigma)**self._pow)
+        log_p = self._offset - np.sum(self._cb * abs(err / self.sigma) ** self._pow)
         return log_p
 
     def plot(self, x):
-        import pylab
-        v = pylab.arange(len(self.data))
-        pylab.plot(v, self.data, 'x', v, self.f(x), '-')
+        import matplotlib.pyplot as plt
+
+        v = np.arange(len(self.data))
+        plt.plot(v, self.data, "x", v, self.f(x), "-")
 
 
 class MVNormal(MCMCModel):
     """
     multivariate normal negative log likelihood function
     """
+
     def __init__(self, mu, sigma):
         self.mu, self.sigma = np.asarray(mu), np.asarray(sigma)
         # Precompute sigma contributions
         r = cholesky(sigma)
         self._rinv = inv(r)
-        self._c = 0.5*len(mu)*log(2*pi) + 0.5*np.sum(diag(r))
+        self._c = 0.5 * len(mu) * log(2 * pi) + 0.5 * np.sum(diag(r))
 
     def nllf(self, x):
         mu, c, rinv = self.mu, self._c, self._rinv
-        y = c + 0.5*np.sum(np.dot(x-mu, rinv)**2)
+        y = c + 0.5 * np.sum(np.dot(x - mu, rinv) ** 2)
         return y
 
 
@@ -229,17 +234,20 @@ class Mixture(MCMCModel):
     Models M1, M2, ... are MCMC models with M.nllf(x) returning the negative
     log likelihood of x.  Weights w1, w2, ... are arbitrary scalars.
     """
-    def __init__(self, *args):
 
+    def __init__(self, *args):
         models = args[::2]
         weights = args[1::2]
-        if (len(args) % 2 != 0
-                or not all(hasattr(M, 'nllf') for M in models)
-                or not all(np.isscalar(w) for w in weights)):
+        if (
+            len(args) % 2 != 0
+            or not all(hasattr(M, "nllf") for M in models)
+            or not all(np.isscalar(w) for w in weights)
+        ):
             raise TypeError("Expected MixtureModel(M1, w1, M2, w2, ...)")
-        self.pairs = zip(models, weights)
+        self.pairs = tuple(zip(models, weights))
         self.weight = np.sum(w for w in weights)
 
     def nllf(self, x):
-        p = [w*exp(-M.nllf(x)) for M, w in self.pairs]
-        return -log(np.sum(p)/self.weight)
+        p = [w * exp(-M.nllf(x)) for M, w in self.pairs]
+        total = np.sum(p) / self.weight
+        return -log(total) if total > 0 else 1e100

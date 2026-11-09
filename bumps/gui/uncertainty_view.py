@@ -1,9 +1,8 @@
-from __future__ import with_statement
-
-from ..dream import views as dream_views
-from ..dream import stats as dream_stats
-from ..dream import varplot as dream_varplot
 from .. import errplot
+
+# from ..dream import stats as dream_stats
+from ..dream import varplot as dream_varplot
+from ..dream import views as dream_views
 from .plot_view import PlotView
 
 
@@ -33,6 +32,13 @@ class UncertaintyView(PlotView):
 
 
 class CorrelationView(PlotView):
+    """
+    CorrelationView has a maximum number of correlations that it will show.
+    Change this by setting CorrelationView.MAX_CORR, either in the individual
+    view or in the class.
+    """
+
+    MAX_CORR = 15
     title = "Correlations"
 
     def update_parameters(self, *args, **kw):
@@ -41,12 +47,11 @@ class CorrelationView(PlotView):
     def plot(self):
         if not self.plot_state:
             return
-        # suppress correlation plot if too many variables
-        if self.plot_state.Nvar > 15:
-            return
-        history = self.plot_state
         with self.pylab_interface as pylab:
             pylab.clf()
+            if self.plot_state.Nvar > self.MAX_CORR:
+                return
+            history = self.plot_state
             dream_views.plot_corrmatrix(history.draw())
             pylab.draw()
 
